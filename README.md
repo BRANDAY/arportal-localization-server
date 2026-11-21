@@ -58,7 +58,7 @@ git clone <repository url> ; cd localization-server
 
 # 2. environment (Python 3.13 and all packages; ~3 GB download, ~10 GB disk)
 uv sync
-uv run pytest                               # 186 tests, no GPU needed, about 5 minutes (4 of them need the phone captures and are skipped without them)
+uv run pytest                               # 192 tests, no GPU needed, about 5 minutes (4 of them need the phone captures and are skipped without them)
 
 # 3. a map: either your own room video ...
 uv run locserver-build-map data\input\room.mp4 --map-id room
@@ -66,8 +66,8 @@ uv run locserver-build-map data\input\room.mp4 --map-id room
 .\scripts\get_test_data.ps1
 uv run locserver-build-map data\datasets\tum_fr1_room\rgbd_dataset_freiburg1_room --map-id tum_room --every 8
 
-# 4. start the server; it prints the address to type into the app.
-#    --panel also opens the monitoring panel in its own window
+# 4. start the server: double click "Start AR Portal Server.cmd" in this folder (it opens the panel and
+#    shows the address to type into the app), or from this window:
 uv run locserver-serve --panel
 
 # 5. no phone at hand? two simulated ones walk through the whole scenario: a staff
@@ -201,7 +201,7 @@ COLMAP binary, ffmpeg, Docker or compiler is needed.
 ```powershell
 cd localization-server
 uv sync            # creates .venv and installs everything (~3 GB download)
-uv run pytest      # 186 tests, no GPU needed, about 5 minutes
+uv run pytest      # 192 tests, no GPU needed, about 5 minutes
 ```
 
 By default everything stays inside the project folder or in the normal
@@ -229,6 +229,12 @@ To make that permanent for one machine, create an untracked `env.local.ps1`
 next to it containing `$env:LOCSERVER_ROOT = "D:\locserver-data"`; then plain
 `. .\env.ps1` is enough. Without a root, `env.ps1` changes nothing. (In the
 examples below, test-data paths are written for the default layout.)
+
+An ordinary PowerShell window of Windows **refuses** `. .\env.ps1` ("running
+scripts is disabled on this system" - the default script policy). Open the
+window with `powershell -ExecutionPolicy Bypass` (valid for that window only),
+or simply start the server with a double click on `Start AR Portal
+Server.cmd`, which takes care of it ("Run the server" below).
 
 **GPU.** The project pins the CUDA 12.6 build of PyTorch 2.14.1 because it is
 the last one that still supports GTX 10xx cards (see "GPU support"). It also
@@ -311,25 +317,88 @@ anchors are therefore moved aside to `anchors.stale.json` instead of being kept.
 
 ## Run the server
 
+### The simple way: a double click
+
+Double click **`Start AR Portal Server.cmd`** in this folder (Windows
+Explorer). That is all:
+
+1. a window "AR Portal Server" opens and says **STARTING ...**;
+2. the panel opens next to it and shows "Server is starting…" - it turns into
+   the live panel by itself as soon as the server answers (about half a
+   minute: the recognition models are loaded);
+3. the window then shows
+
+   ```
+   ============================================================================
+
+      SERVER IS RUNNING      ("MY-PC", version 0.7.2)
+
+      ADDRESS FOR THE PHONE:
+          http://192.168.1.50:8077
+        The app finds it by itself ("Find automatically"); type it in if it does not.
+        Test from the phone's browser: http://192.168.1.50:8077/health   (no answer? run: uv run locserver-doctor)
+
+      Panel on this PC:  http://127.0.0.1:8077/ui
+
+      TO STOP THE SERVER: close this window (or press Ctrl+C).
+
+   ============================================================================
+   ```
+
+**To stop the server, close that window.** The panel then says "Server is not
+running" and comes back by itself when the server is started again.
+
+* A second double click while the server runs starts nothing: the window says
+  **THE SERVER IS ALREADY RUNNING**, shows the address for the phone and opens
+  the panel.
+* If something is missing, the window says what and what to do (the Python
+  environment is not installed yet -> `uv sync`; the port is used by another
+  program -> which one), and it stays open until a key is pressed. It never
+  closes silently.
+* A shortcut on the desktop: double click `Create Desktop Shortcut.cmd` once.
+  It is not created automatically.
+* Everything shown in the window is also written to `<work>\server.log`
+  (`data\work`, or `LOCSERVER_WORK`), and everything the phones send is kept
+  under `<work>\incoming` (another folder: `$env:LOCSERVER_KEEP_INCOMING =
+  "D:\somewhere"` in `env.local.ps1`; `"off"` switches it off) - see "Looking
+  at a failure afterwards" above.
+* Another port: `"Start AR Portal Server.cmd" -Port 9000` from a command
+  prompt; without the panel window: `-NoPanel`.
+* **One server per data folder.** Do not start a second server on another port
+  with the same maps and work folders: at its start a server tidies up
+  unfinished builds, which would be the running builds of the first one.
+
+The start file needs nothing changed on the PC: it calls PowerShell with
+`-ExecutionPolicy Bypass` for its own script only, loads `env.ps1` (and with it
+the untracked `env.local.ps1`), and runs the server with the Python of the
+environment that `uv sync` made.
+
+### By hand, from a terminal
+
 ```powershell
 uv run locserver-serve                 # all network interfaces, port 8077, all maps in data\maps
 uv run locserver-serve --panel         # the same, and open the monitoring panel in its own window
 uv run locserver-serve --port 9000 --name "Lab laptop" --device cpu --maps-dir D:\maps
 ```
 
-After loading the models (≈ 5 s) it prints where it can be reached:
+**If the large files are on another drive** (`env.local.ps1` sets
+`LOCSERVER_ROOT`), the environment has to be loaded into the window first -
+and in an ordinary PowerShell window of Windows that line is **refused** ("…
+cannot be loaded because running scripts is disabled on this system"): the
+default script policy is `Restricted`. The server then does not start, or `uv`
+starts to build a new, empty environment. Open the window so that it is
+allowed for this one window only:
 
+```powershell
+powershell -ExecutionPolicy Bypass     # a PowerShell that may run the project's own scripts; nothing is changed permanently
+. .\env.ps1
+uv run locserver-serve --panel --keep-incoming
 ```
-AR Portal localization server "MY-PC" - service arportal-localization-server, API v1
-  Reachable on the local network at:
-    http://192.168.1.50:8077
-  In the app: type that address into the server field, or tap "Find automatically".
-  Check from the phone's browser: http://192.168.1.50:8077/health   (no answer? run: uv run locserver-doctor)
 
-  Monitoring panel on this PC: http://127.0.0.1:8077/ui   (own window: uv run locserver-panel)
-```
+Started by hand the server prints the same block: first "STARTING ...", and
+"SERVER IS RUNNING" with the address only once it really answers.
 
-One line is printed per network interface; with several (Ethernet, Wi-Fi,
+One address is printed per network interface; with several (Ethernet, Wi-Fi,
 virtual adapters) use the one in the same network as the phone. Interactive
 API docs: <http://localhost:8077/docs>.
 
@@ -367,6 +436,7 @@ start it.
 
 | Block | What it shows |
 |---|---|
+| **Status strip** (under the title) | **Server is running** since when, the address to type into the phone (with a Copy button), how many phones with the app are connected right now, whether a map is being built (stage, percent, time left). When the server is stopped it turns red - **Server is not running** - keeps the last known state on the page and comes back by itself when the server is started again. Started with the double click, the window first shows a page "Server is starting…" that turns into the panel as soon as the server answers |
 | **How it is used** (top strip) | the six steps of the scenario - connect the phone, scan the room, build the map, find the doorway, localise the phone, portal in place - each marked done / now / to do / needs attention, and one line "Next: ..." with what to do. Derived from what the server sees (requests, jobs, maps, localisations) and from the step the app reports. With several devices it follows the one selected in the device list |
 | **Server** | name, version, GPU or CPU, GPU memory, processor, uptime, the addresses to type into the app (with a Copy button), the models, and whether the server ever stopped answering ("Stalls", see below) |
 | **Devices** | every client that has contacted the server: name, address, last seen, the server's handling time, the round-trip time the app measured, the app's current step and tracking state, request and error counts. **online** while the last request is less than 10 s old, otherwise **lost** (with a Forget button). A client that does not send the device headers appears as "unnamed client" under its IP address. Click a row to filter the logs and the strip to that device |
@@ -558,7 +628,7 @@ automatically", which asks every address of the phone's own /24 network for
 
    ```
    [info] LAN address: http://192.168.1.50:8077   (Wi-Fi)
-   [ OK ] Server "MY-PC" is running on port 8077 (version 0.7.1, API v1, maps: room).
+   [ OK ] Server "MY-PC" is running on port 8077 (version 0.7.2, API v1, maps: room).
    [info] Network "CampusNet" on Wi-Fi: profile Public
    [FIX ] No firewall rule lets inbound TCP 8077 through on Public networks, ...
               New-NetFirewallRule -DisplayName "AR Portal localization server (TCP 8077)" ...
@@ -709,9 +779,9 @@ what the app's automatic search and its "connected" indicator call.
  "api_version": 1,
  "api_revision": 6,
  "capabilities": ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones"],
- "server_version": "0.7.1",
+ "server_version": "0.7.2",
  "server_name": "MY-PC",
- "version": "0.7.1", "device": "cuda", "device_name": "NVIDIA GeForce GTX 1050 Ti",
+ "version": "0.7.2", "device": "cuda", "device_name": "NVIDIA GeForce GTX 1050 Ti",
  "vram_mb": {"allocated": 56, "peak": 527},
  "models": {"extractor": "aliked-n16", "matcher": "lightglue-aliked", "max_keypoints": 2048},
  "maps": ["tum_room"], "maps_dir": "C:\\...\\data\\maps", "sessions": 0, "uptime_s": 12.3,

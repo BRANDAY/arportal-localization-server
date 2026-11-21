@@ -69,6 +69,39 @@ def banner_lines(host: str, port: int, addresses: list[str], server_name: str) -
     return lines + [""]
 
 
+def ready_lines(host: str, port: int, addresses: list[str], server_name: str, version: str = "") -> list[str]:
+    """The block printed once the server really answers: that it runs, what to type into the phone, how to stop it."""
+    bar = "=" * 76
+    loop = host in ("127.0.0.1", "localhost", "::1")
+    urls = [] if loop else [f"http://{a}:{port}" for a in (addresses if host in ("0.0.0.0", "::", "") else [host])]
+    lines = ["", bar, "", f"   SERVER IS RUNNING      (\"{server_name}\"{', version ' + version if version else ''})", ""]
+    if urls:
+        lines.append("   ADDRESS FOR THE PHONE:")
+        lines += [f"       {u}" for u in urls]
+        if len(urls) > 1:
+            lines.append("     (several networks: use the address that is in the same network as the phone)")
+        lines += ['     The app finds it by itself ("Find automatically"); type it in if it does not.',
+                  f"     Test from the phone's browser: {urls[0]}/health   (no answer? run: uv run locserver-doctor)"]
+    elif loop:
+        lines += ["   THIS PC ONLY - a phone cannot connect (started with --host 127.0.0.1)."]
+    else:
+        lines += ["   NO NETWORK: this PC has no address in a local network.",
+                  "     Connect it to the same Wi-Fi as the phone and start the server again."]
+    lines += ["", f"   Panel on this PC:  http://127.0.0.1:{port}/ui", "",
+              "   TO STOP THE SERVER: close this window (or press Ctrl+C).", "", bar, ""]
+    return lines
+
+
+def port_free(host: str, port: int) -> bool:
+    """Can a server listen on ``host:port`` right now?"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((host if host not in ("", "::") else "0.0.0.0", port))
+            return True
+    except OSError:
+        return False
+
+
 def port_open(host: str, port: int, timeout: float = 0.5) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):

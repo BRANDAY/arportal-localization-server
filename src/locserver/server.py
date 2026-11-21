@@ -1230,6 +1230,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--maps-dir", default=None, help=f"default: {config.maps_dir()}")
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     ap.add_argument("--log-level", default="INFO")
+    ap.add_argument("--access-log", action="store_true", help="print one line per HTTP request (off: the panel shows them)")
     ap.add_argument("--panel", action="store_true", help="also open the monitoring panel in a desktop window")
     ap.add_argument("--keep-incoming", nargs="?", const="1", default=None, metavar="FOLDER",
                     help="keep everything the phones send (clips, recordings, answers) - in FOLDER, or in <work>/incoming "
@@ -1240,19 +1241,44 @@ def main(argv: list[str] | None = None) -> int:
 
         os.environ["LOCSERVER_KEEP_INCOMING"] = a.keep_incoming
     config.setup_logging(a.log_level)
-    app = create_app(maps_dir=Path(a.maps_dir) if a.maps_dir else None, device=a.device, server_name=a.name)
+    say = lambda *lines: print(*lines, sep="\n", flush=True)  # noqa: E731
+    say("", f"AR Portal localization server {__version__} - STARTING ...",
+        "  Loading the recognition models. This takes about half a minute.", "")
+    if not netinfo.port_free(a.host, a.port):
+        other = netinfo.probe_health("127.0.0.1", a.port)
+        say(f"COULD NOT START: port {a.port} is already in use.",
+            f"  A localization server (version {other.get('version')}) is ALREADY RUNNING on this PC - use that one: "
+            f"http://127.0.0.1:{a.port}/ui" if netinfo.is_our_server(other)
+            else f"  Another program listens on port {a.port}. Close it, or start this server on another port:  --port {a.port + 1}", "")
+        return 3
+    try:
+        app = create_app(maps_dir=Path(a.maps_dir) if a.maps_dir else None, device=a.device, server_name=a.name)
+    except Exception as e:  # say it in one line before the long trace
+        say(f"COULD NOT START: {type(e).__name__}: {e}",
+            "  Out of memory? Close other programs that use the graphics card (games) and start again.",
+            "  Missing module or file? Run `uv sync` once in this folder (README, Setup).", "")
+        raise
     st: State = app.state.locserver
     log.info("device %s (%s), maps %s from %s", st.pipe.device, st.pipe.device_name, sorted(st.maps), st.maps_dir)
-    for line in netinfo.banner_lines(a.host, a.port, netinfo.lan_ipv4_addresses(), st.server_name):
-        print(line, flush=True)
     panel_url = f"http://127.0.0.1:{a.port}/ui"
-    print(f"  Monitoring panel on this PC: {panel_url}   (own window: uv run locserver-panel)", flush=True)
-    print("", flush=True)
-    if a.panel:
-        from .panel import open_panel
 
-        threading.Timer(1.5, lambda: print(open_panel(panel_url), flush=True)).start()
-    uvicorn.run(app, host=a.host, port=a.port, log_level=a.log_level.lower())
+    def announce() -> None:  # only once the server really answers: the banner must not promise what is not there
+        for _ in range(300):
+            if netinfo.is_our_server(netinfo.probe_health("127.0.0.1", a.port, timeout=1.0)):
+                say(*netinfo.ready_lines(a.host, a.port, netinfo.lan_ipv4_addresses(), st.server_name, __version__))
+                if a.panel:
+                    from .panel import open_panel
+
+                    say(open_panel(panel_url))
+                return
+            time.sleep(0.2)
+        say("The server did not answer on its own port within a minute - see the lines above for the reason.")
+
+    threading.Thread(target=announce, name="locserver-announce", daemon=True).start()
+    # no line per request in the window: the panel polls every second and would push the address out of sight
+    # (requests are in the panel's log and, with --keep-incoming, in requests.jsonl)
+    uvicorn.run(app, host=a.host, port=a.port, log_level=a.log_level.lower(), access_log=a.access_log)
+    say("", "The server has stopped.", "")
     return 0
 
 

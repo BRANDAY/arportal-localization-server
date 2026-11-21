@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AR Portal server</title>
+<!-- Shown by "Start AR Portal Server" while the server is still loading: this file is opened from the disk (the server
+     cannot serve a page before it runs), asks the server every second and goes over to the panel as soon as it answers. -->
+<style>
+:root { color-scheme: light dark; --bg: #f3f2ee; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781; --line: #e1e0d9; --accent: #2a78d6; --critical: #d03b3b; }
+@media (prefers-color-scheme: dark) { :root { --bg: #111110; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --line: #2c2c2a; --accent: #3987e5; } }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, "Segoe UI", sans-serif; padding: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-left: 6px solid var(--accent); border-radius: 10px; padding: 26px 30px; max-width: 620px; width: 100%; }
+.card.late { border-left-color: var(--critical); }
+h1 { font-size: 22px; margin: 0 0 6px; display: flex; align-items: center; gap: 10px; }
+h1 i { font-style: normal; color: var(--accent); animation: blink 1s infinite; } .late h1 i { color: var(--critical); }
+@keyframes blink { 50% { opacity: .25; } }
+p { margin: 8px 0 0; color: var(--ink2); } p b { color: var(--ink); }
+.mono { font-family: ui-monospace, Consolas, monospace; color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <h1><i>&#9679;</i><span id="title">Server is starting&hellip;</span></h1>
+  <p id="line">Loading the recognition models. This takes about half a minute.</p>
+  <p>Waiting for <span class="mono" id="addr"></span> &middot; <b id="secs">0 s</b></p>
+  <p id="hint">This page changes to the panel by itself as soon as the server answers.</p>
+</div>
+<script>
+"use strict";
+const port = Number(new URLSearchParams(location.search).get("port")) || 8077;
+const base = "http://127.0.0.1:" + port, t0 = Date.now();
+document.getElementById("addr").textContent = base;
+async function ask() {
+  try {
+    await fetch(base + "/health", { mode: "no-cors", cache: "no-store" });  // any answer means the server is up
+    location.replace(base + "/ui");
+    return;
+  } catch (e) { /* not up yet */ }
+  const s = Math.round((Date.now() - t0) / 1000);
+  document.getElementById("secs").textContent = s < 90 ? s + " s" : Math.round(s / 60) + " min";
+  if (s > 120) {
+    document.getElementById("card").className = "card late";
+    document.getElementById("title").textContent = "Server is not running";
+    document.getElementById("line").textContent = "It did not answer for two minutes. Look at the window “AR Portal Server”: it says what went wrong. "
+      + "If that window is closed, start the server again with “Start AR Portal Server”.";
+  }
+  setTimeout(ask, 1000);
+}
+ask();
+</script>
+</body>
+</html>

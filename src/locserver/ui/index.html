@@ -81,7 +81,15 @@ canvas { display: block; width: 100%; height: 440px; border: 1px solid var(--lin
 .tip { position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--muted); border-radius: 6px; padding: 5px 8px; font-size: 12px; max-width: 260px; display: none; z-index: 3; }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--ink2); font-size: 12px; margin-top: 6px; align-items: center; }
 .legend svg { vertical-align: -2px; margin-right: 4px; }
-#offline { display: none; background: var(--critical); color: #fff; padding: 6px 16px; }
+#status { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 22px; padding: 9px 16px; border-bottom: 1px solid var(--line); background: var(--surface); border-left: 6px solid var(--muted); }
+#status .big { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+#status .big i { font-style: normal; color: var(--muted); }
+#status .facts { display: flex; flex-wrap: wrap; gap: 4px 22px; color: var(--ink2); align-items: center; }
+#status .facts b { color: var(--ink); font-weight: 600; }
+#status .facts .mono { color: var(--ink); font-weight: 600; }
+#status.up { border-left-color: var(--good); } #status.up .big i { color: var(--good); }
+#status.down { border-left-color: var(--critical); background: color-mix(in srgb, var(--critical) 9%, var(--surface)); } #status.down .big i { color: var(--critical); }
+#status.wait .big i { animation: blink 1s infinite; } @keyframes blink { 50% { opacity: .25; } }
 </style>
 </head>
 <body>
@@ -92,7 +100,10 @@ canvas { display: block; width: 100%; height: 440px; border: 1px solid var(--lin
   <span class="chip idle" id="live"><i>&#9679;</i><span>live</span></span>
   <button id="theme" title="Switch between light and dark">Theme</button>
 </header>
-<div id="offline">The server does not answer. The panel shows the last known state and keeps trying.</div>
+<div id="status" class="wait">
+  <div class="big"><i>&#9679;</i><span id="st-title">Connecting to the server&hellip;</span></div>
+  <div class="facts" id="st-facts"></div>
+</div>
 <main>
   <section class="card c12">
     <h2>How it is used &mdash; where things stand <span class="grow"></span><span class="muted" id="flowdev" style="text-transform:none;letter-spacing:0;font-weight:400"></span></h2>
@@ -475,17 +486,46 @@ function drawPlan() {
 })();
 
 // ---------------------------------------------------------------- main loop
-let fails = 0, tick = 0;
+let fails = 0, tick = 0, lastAnswer = 0, startedAt = 0;
+// The strip under the title: is the server running, since when, what to type into the phone, who is connected, is a map being built.
+function renderStatus(up) {
+  const box = $("status"), title = $("st-title"), facts = $("st-facts"); facts.replaceChildren();
+  const fact = (label, value) => { const s = el("span"); s.append(label + " ", value instanceof Node ? value : el("b", "", value)); facts.append(s); };
+  if (!up) {
+    box.className = lastAnswer ? "down" : "wait";
+    title.textContent = lastAnswer ? "Server is not running" : "Connecting to the server…";
+    if (lastAnswer) {
+      fact("Last answer", fmtTime(lastAnswer).slice(0, 8));
+      facts.append(el("span", "", "Start it again with “Start AR Portal Server” (double click). This page shows the last known state and comes back by itself."));
+    }
+    return;
+  }
+  const s = S.server;
+  box.className = "up"; title.textContent = "Server is running";
+  fact("since", fmtTime(Date.now() - s.uptime_s * 1000).slice(0, 5) + " (" + dur(s.uptime_s) + ")");
+  if (s.urls.length) {
+    const a = el("span", "mono", s.urls.join("   or   ")), b = el("button", "", "Copy");
+    b.onclick = () => navigator.clipboard && navigator.clipboard.writeText(s.urls[0]);
+    const w = el("span"); w.append(a, " ", b); fact("Address for the phone:", w);
+  } else fact("Address for the phone:", "none - this PC is not on a network");
+  const on = (S.devices || []).filter(d => d.online && d.identified).length;  // the app names itself; a browser or a script does not count
+  fact("Phones connected now:", String(on));
+  const job = (S.jobs || []).find(j => j.state === "running"), queued = (S.jobs || []).filter(j => j.state === "queued").length;
+  fact("Map build:", job ? job.map_id + " - " + (job.stage || "starting") + ", " + Math.round(job.progress * 100) + " %"
+    + (job.eta_s ? ", about " + dur(job.eta_s) + " left" : "") + (queued ? " (+" + queued + " waiting)" : "") : queued ? queued + " waiting" : "none");
+}
 async function refresh() {
   try {
     const r = await fetch("/monitor/state" + (selDev ? "?device=" + encodeURIComponent(selDev) : ""), { cache: "no-store" }); if (!r.ok) throw new Error(r.status);
-    S = await r.json(); fails = 0;
-    $("offline").style.display = "none"; $("live").className = "chip good"; $("live").lastChild.textContent = "live";
-    renderFlow(S.flow); renderServer(S.server); renderDevices(S.devices); renderMaps(S.maps); renderJobs(S.jobs); renderLocs(S.localizations);
+    const fresh = await r.json(), began = Date.now() - fresh.server.uptime_s * 1000;
+    if (startedAt && began - startedAt > 5000) { location.reload(); return; }  // the server was started anew: begin with a clean page
+    S = fresh; startedAt = startedAt || began; fails = 0; lastAnswer = Date.now();
+    $("live").className = "chip good"; $("live").lastChild.textContent = "live";
+    renderStatus(true); renderFlow(S.flow); renderServer(S.server); renderDevices(S.devices); renderMaps(S.maps); renderJobs(S.jobs); renderLocs(S.localizations);
     await pollFeed();
     await loadMap(tick++ % 15 === 0 && !mapData);
   } catch (e) {
-    if (++fails >= 2) { $("offline").style.display = "block"; $("live").className = "chip critical"; $("live").lastChild.textContent = "no answer"; }
+    if (++fails >= 2) { renderStatus(false); $("live").className = "chip critical"; $("live").lastChild.textContent = "no answer"; $("hdr").textContent = lastAnswer ? "not running" : "connecting…"; }
   }
   setTimeout(refresh, 1000);
 }

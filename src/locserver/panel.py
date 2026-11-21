@@ -60,6 +60,14 @@ def check_server(base_url: str, timeout: float = 3.0) -> tuple[bool, str]:
     return True, f"{health.get('server_name') or 'server'} {health.get('version')} at {base_url}"
 
 
+def waiting_url(port: int) -> str:
+    """Address of the page that waits for a server on this PC to come up and then turns into its panel.
+
+    A file on the disk: the server cannot serve anything before it runs.
+    """
+    return (Path(__file__).parent / "ui" / "starting.html").resolve().as_uri() + f"?port={int(port)}"
+
+
 def open_panel(url: str, browser: str | None = None, app_window: bool = True) -> str:
     """Open ``url``; returns a line saying how it was opened."""
     exe = browser or (find_app_browser() if app_window else None)
@@ -83,8 +91,13 @@ def main(argv=None) -> int:
     ap.add_argument("--browser", help="path of the browser to use (default: Edge or Chrome if installed)")
     ap.add_argument("--tab", action="store_true", help="open an ordinary tab of the default browser instead of a separate window")
     ap.add_argument("--no-check", action="store_true", help="open the window even if the server does not answer")
+    ap.add_argument("--wait", action="store_true",
+                    help="the server on this PC is still starting: open a page that waits for it and then shows the panel")
     a = ap.parse_args(argv)
 
+    if a.wait:
+        print(open_panel(waiting_url(a.port or config.port()), a.browser, app_window=not a.tab))
+        return 0
     base = (a.url or f"http://127.0.0.1:{a.port or config.port()}").rstrip("/")
     if base.endswith("/ui"):
         base = base[:-3]

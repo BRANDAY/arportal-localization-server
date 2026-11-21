@@ -6,16 +6,18 @@ This page is for that first run.
 
 ## Start
 
-```powershell
-cd localization-server
-. .\env.ps1
-uv run locserver-serve --panel --keep-incoming E:\VR-FESB\incoming
-```
+Double click **`Start AR Portal Server.cmd`** in the server's folder. A window
+says "STARTING ...", then "SERVER IS RUNNING" with the address for the phone;
+the panel opens by itself. Closing the window stops the server. (By hand, and
+why three plain commands fail in an ordinary PowerShell window: README, "Run
+the server".)
 
-* `--keep-incoming` keeps every clip, every recording (also a refused one),
-  every answer and one line per request - so that a failure can be studied
-  without walking through the room again. The folder is outside the
-  repository; recordings of a real room are private.
+* Started this way the server keeps every clip, every recording (also a
+  refused one), every answer and one line per request - so that a failure can
+  be studied without walking through the room again. The folder
+  (`<work>\incoming`, or `LOCSERVER_KEEP_INCOMING` in `env.local.ps1`; on the
+  development PC `E:\VR-FESB\incoming`) is outside the repository; recordings
+  of a real room are private.
 * **Nothing else on the graphics card.** A game on the same card makes every
   step two to three times slower and can make the build run out of memory.
   `nvidia-smi` must show only this server.
