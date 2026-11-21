@@ -40,6 +40,11 @@ class Reporter:
         self.last = (stage, now)
         emit({"stage": stage, "p": round(float(fraction), 4), "msg": message})
 
+    @staticmethod
+    def plan(frames: int, pairs: int) -> None:
+        """How much work the build is: the server sets the shares of the stages and its estimate of the time left by it."""
+        emit({"plan": {"frames": int(frames), "pairs": int(pairs)}})
+
 
 def classify(e: BaseException) -> str:
     text = str(e).lower()

@@ -209,7 +209,7 @@ POST /jobs/{job_id}/cancel     -> Job                        (no effect on a fin
 | `progress` | 0..1 overall, never decreases, `1.0` only when `state == "succeeded"` — show this as the percentage |
 | `message` | one short English line for a debug overlay |
 | `queue_position` | 0 = running or next; jobs run one at a time |
-| `eta_s` | rough remaining seconds, `null` when unknown (always `null` while queued) |
+| `eta_s` | remaining seconds, `null` when unknown (always `null` while queued, and in the first seconds of a build). From server 0.7.1 it follows the pace the build itself shows and the amount of work (frames, image pairs); a scan of 85 s takes about 20 minutes on the reference PC - show it as minutes and keep polling for as long as `state` is `running` |
 | `error` | `null` or `{"code": "...", "message": "..."}` when `state == "failed"` |
 | `result` | `null` until `succeeded`, then the summary below |
 
@@ -544,6 +544,25 @@ New optional form field:
 The answer always carries `"room_choice"` (section 12), `"frame_id"` and
 `"load"` (section 13: how long the request stood in line, and when to send the
 next one).
+
+With a `session_id` and a usable alignment the answer also carries
+`"door_stability"` (otherwise `null`) - numbers for a report, nothing the app
+has to act on:
+
+```json
+"door_stability": {"point": "door", "attempt": 4, "position": [1.21, 0.0, -2.48],
+                   "shift_from_previous_m": 0.012, "shift_from_median_m": 0.008,
+                   "spread_m": 0.021, "spread_max_m": 0.047}
+```
+
+Every request of a session gives a new alignment, so the door is put anew each
+time. `position` is where it stands now in the phone's AR world;
+`shift_from_previous_m` how far that is from the previous request of the same
+session (what a person sees as the door jumping); `shift_from_median_m` and
+`spread_m` / `spread_max_m` (root mean square / largest) are distances from
+the middle position of all the session's attempts. `point` is `door`, or
+`map_origin` while the room has no door. A new door, a re-scan of the room or
+a new AR session starts a new series (`attempt` 1, the shifts `null`).
 
 When the alignment is complete (`alignment.status == "ok"`), `alignment` gains:
 
@@ -1279,7 +1298,9 @@ the server with `--keep-incoming [FOLDER]` (or `LOCSERVER_KEEP_INCOMING`).
 Then every `/localize` leaves a folder with the clip, its `session.jsonl`, the
 form fields and the answer; recordings are kept with their build log even when
 refused or replaced by a newer one; `requests.jsonl` has one line per request
-with status, duration and the reason of a refusal. `GET /health` says
+with status, duration and the reason of a refusal; `localizations.csv` has one
+row per answered `/localize` (result, quality, matches, inliers, times,
+alignment, `door_shift_m`, `door_spread_m`, the folder). `GET /health` says
 `"keeps_incoming": true`. Off by default. Nothing changes for the app.
 
 ---
@@ -1335,6 +1356,15 @@ with status, duration and the reason of a refusal. `GET /health` says
   gains `wifi` (counts only - addresses are never returned). **Changed
   behaviour:** `/localize` without `map_id` on a server with several rooms
   used to answer `422`; it now looks for the room. Capability `wifi_hint`.
+* 2026-11-21 — server 0.7.1, revision unchanged: `progress` and `eta_s` of a
+  build job follow the amount of work and the pace of the build (before:
+  fixed shares per stage); a build of a long scan takes about 20 minutes and
+  has no time limit on the server - the app must keep polling.
+* 2026-11-21 — server 0.7.1, revision unchanged: the answer of `/localize`
+  gains `door_stability` (how far the door moved between the requests of one
+  AR session; section 6). With `--keep-incoming` every answered request is
+  also a row of `localizations.csv`. Numbers for a report; the app need not
+  read them.
 * 2026-11-21 — **revision 6, server 0.7.0: several phones at once** (owner:
   about five phones looking at one door, not fifty). New section 13.
   `/localize` requests are served in the order of arrival; under load a clip

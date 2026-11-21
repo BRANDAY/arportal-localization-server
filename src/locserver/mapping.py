@@ -167,6 +167,9 @@ def build_map(
     timings["frames_s"] = time.perf_counter() - t0
     log.info("selected %d frames (%s)", len(names), sel_stats)
     progress("frames", 1.0, f"{len(names)} frames selected")
+    plan = getattr(progress, "plan", None) or (lambda frames, pairs: None)  # how much work lies ahead, for an honest estimate
+    n = len(names)
+    plan(n, n * (n - 1) // 2 if n <= opts.exhaustive_below else n * (opts.seq_window + opts.retrieval_k))
 
     # 2. local features ------------------------------------------------------ #
     t0 = time.perf_counter()
@@ -184,6 +187,7 @@ def build_map(
     vlad0 = VLAD.fit(all_desc, opts.vlad_clusters)
     gdesc0 = np.stack([vlad0.encode(feats[n].descriptors) for n in names])
     pairs = choose_pairs(len(names), gdesc0, opts)
+    plan(len(names), len(pairs))
     timings["pairs_s"] = time.perf_counter() - t0
 
     # 4. COLMAP database + matching ------------------------------------------ #

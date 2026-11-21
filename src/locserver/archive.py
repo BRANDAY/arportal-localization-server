@@ -9,7 +9,10 @@ Off by default. Switched on with the environment variable
 * every recording upload keeps its job folder (video, session log, spec,
   worker log) - also when the recording was refused or the build failed;
 * ``requests.jsonl`` gets one line per request with its status, duration and,
-  for a refused one, the reason.
+  for a refused one, the reason;
+* ``localizations.csv`` gets one row per answered ``/localize``: result,
+  quality, matches, inliers, times, alignment, and how far the door moved
+  since the earlier attempts of the same AR session.
 
 Recordings of a real room are private: the folder lies outside the repository
 and nothing here is ever sent anywhere.
@@ -17,6 +20,7 @@ and nothing here is ever sent anywhere.
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import re
@@ -101,6 +105,22 @@ class Archive:
         if note:
             self.write_json(d, "note.json", note)
         return d
+
+    def csv_line(self, name: str, row: dict) -> None:
+        """One row of a table that opens in a spreadsheet; the header is written with the first row."""
+        if not self.root:
+            return
+        try:
+            path = self.root / name
+            with self._lock:
+                fresh = not path.exists() or path.stat().st_size == 0
+                with open(path, "a", encoding="utf-8", newline="") as fh:
+                    w = csv.DictWriter(fh, fieldnames=list(row), extrasaction="ignore")
+                    if fresh:
+                        w.writeheader()
+                    w.writerow({k: ("" if v is None else v) for k, v in row.items()})
+        except (OSError, ValueError):
+            log.warning("could not append to %s", name, exc_info=True)
 
     def request_line(self, entry: dict) -> None:
         if not self.root:

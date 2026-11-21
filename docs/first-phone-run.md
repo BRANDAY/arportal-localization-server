@@ -30,9 +30,10 @@ uv run locserver-serve --panel --keep-incoming E:\VR-FESB\incoming
 |---|---|
 | The panel, strip at the top | which step the phone is in (connect, scan, upload, build, room, door, localise) and what it waits for |
 | The panel, "Jobs" | the build: step, percent, and at the end its **warnings** - read them |
-| The panel, "Localisations" | every `/localize`: good / weak / failed, inliers, milliseconds |
+| The panel, "Localisations" | every `/localize`: good / weak / failed, matches, inliers, milliseconds, and how far the door moved since the previous request of the same AR session |
 | The panel, "Device log" | what the app itself reported (tracking state, errors) |
 | `E:\VR-FESB\incoming\requests.jsonl` | one line per request: status, duration, the reason of a refusal |
+| `E:\VR-FESB\incoming\localizations.csv` | the same list as a table for a report: one row per answered `/localize` |
 | `E:\VR-FESB\incoming\<date>\..._localize_...` | the clip, `request.json`, `response.json` of one `/localize` |
 | `E:\VR-FESB\work\jobs\<job id>\` | the recording (`video.mp4`, `session.jsonl`), `spec.json`, `worker.log` of a build |
 

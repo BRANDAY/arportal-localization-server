@@ -148,6 +148,7 @@ function chip(kind, icon, label) { const c = el("span", "chip " + kind); c.appen
 const fmtTime = ms => { const d = new Date(ms); return d.toLocaleTimeString("en-GB") + "." + String(d.getMilliseconds()).padStart(3, "0"); };
 const dur = s => s < 90 ? Math.round(s) + " s" : s < 5400 ? Math.round(s / 60) + " min" : (s / 3600).toFixed(1) + " h";
 const num = (v, d = 0) => v === null || v === undefined ? "–" : Number(v).toFixed(d);
+const cm = m => (m * 100).toFixed(m < 0.1 ? 1 : 0) + " cm";
 
 let S = null, selMap = null, pickedMap = false, selDev = "", mapData = null, mapKey = "", lastFeed = 0;
 const devEntries = [], reqEntries = [], MAXLOG = 1500;
@@ -281,14 +282,21 @@ function renderLocs(list) {
   const box = $("locs");
   if (!list.length) { box.replaceChildren(el("div", "empty", "No localization request yet.")); return; }
   const t = el("table"), h = el("tr");
-  ["Time", "Device", "Map", "Result", "Inliers", "Time taken", "Alignment", "Portal", "Reason"].forEach((x, i) => h.append(el("th", i === 4 || i === 5 ? "num" : "", x)));
+  ["Time", "Device", "Map", "Result", "Matches", "Inliers", "Time taken", "Alignment", "Door moved", "Portal", "Reason"].forEach((x, i) => {
+    const th = el("th", i >= 4 && i <= 6 || i === 8 ? "num" : "", x);
+    if (i === 8) th.title = "How far the door moved in the phone's AR world since the previous request of the same AR session, and (in brackets) the usual distance from the session's middle position. Small and shrinking is good.";
+    h.append(th);
+  });
   t.append(h);
   const names = Object.fromEntries((S.devices || []).map(d => [d.device_id, d.name || d.device_id]));
   list.forEach(l => {
     const r = el("tr"), res = el("td");
     res.append(l.quality === "good" ? chip("good", "✓", "good") : l.success ? chip("warning", "▲", "weak") : chip("critical", "✕", "failed"));
     r.append(el("td", "mono", fmtTime(l.server_time_ms)), el("td", "", names[l.device_id] || l.device_id), el("td", "", l.map_id), res,
-      el("td", "num", l.num_inliers), el("td", "num", num(l.elapsed_ms) + " ms"), el("td", "", l.alignment || "–"), el("td", "", l.portal_source || "–"), el("td", "ink2", l.reason || ""));
+      el("td", "num", l.num_matches ?? "–"), el("td", "num", l.num_inliers), el("td", "num", num(l.elapsed_ms) + " ms"),
+      el("td", "", (l.alignment || "–") + (l.observations_used ? " (" + l.observations_used + ")" : "")),
+      el("td", "num", l.door_shift_m == null ? (l.door_attempt === 1 ? "first" : "–") : cm(l.door_shift_m) + (l.door_spread_m == null ? "" : " (" + cm(l.door_spread_m) + ")")),
+      el("td", "", l.portal_source || "–"), el("td", "ink2", l.reason || ""));
     t.append(r);
   });
   box.replaceChildren(t);

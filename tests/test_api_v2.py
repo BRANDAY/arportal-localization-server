@@ -153,7 +153,7 @@ def test_progress_is_monotonic_and_weighted():
     assert seen == sorted(seen) and seen[-1] < 1.0 and job.progress == seen[-1]
     assert sum(w for _, w in STAGES["build_map"]) == pytest.approx(1.0) and sum(w for _, w in STAGES["room_plan"]) == pytest.approx(1.0)
     pub = job.public()
-    assert pub["stage"] == "frames" and pub["stage_index"] == 1 and pub["stage_count"] == 7
+    assert pub["stage"] == "finalize" and pub["stage_index"] == 7 and pub["stage_count"] == 7  # ...nor the stage
 
 
 def test_unfinished_jobs_of_a_stopped_server_are_reported_failed(tmp_path):

@@ -58,7 +58,7 @@ git clone <repository url> ; cd localization-server
 
 # 2. environment (Python 3.13 and all packages; ~3 GB download, ~10 GB disk)
 uv sync
-uv run pytest                               # 180 tests, no GPU needed, about 5 minutes (4 of them need the phone captures and are skipped without them)
+uv run pytest                               # 186 tests, no GPU needed, about 5 minutes (4 of them need the phone captures and are skipped without them)
 
 # 3. a map: either your own room video ...
 uv run locserver-build-map data\input\room.mp4 --map-id room
@@ -113,6 +113,16 @@ the same graphics card. Section 13 of the API document.
 clip with its answer, every recording with its build log (also a refused
 one), and one line per request in `requests.jsonl`. Recordings of a real room
 are private - keep that folder outside the repository.
+
+**Numbers for a report.** Every answered `/localize` is one row of
+`localizations.csv` in that folder (it opens in a spreadsheet) and one row of
+the panel's "Localisations" list: found or not, quality, matches, inliers,
+time taken and time in line, the alignment with its residual, and **how far
+the door moved since the previous request of the same AR session**
+(`door_shift_m`) together with the session's usual distance from its middle
+position (`door_spread_m`). The same numbers are in the answer itself as
+`door_stability`. A door that jumps less with every request and settles within
+a few centimetres is what a working localisation looks like.
 
 **State of verification (2026-11-21).** Everything runs end to end with the
 simulated phones and with public test data. From a real phone the server has so
@@ -191,7 +201,7 @@ COLMAP binary, ffmpeg, Docker or compiler is needed.
 ```powershell
 cd localization-server
 uv sync            # creates .venv and installs everything (~3 GB download)
-uv run pytest      # 180 tests, no GPU needed, about 5 minutes
+uv run pytest      # 186 tests, no GPU needed, about 5 minutes
 ```
 
 By default everything stays inside the project folder or in the normal
@@ -548,7 +558,7 @@ automatically", which asks every address of the phone's own /24 network for
 
    ```
    [info] LAN address: http://192.168.1.50:8077   (Wi-Fi)
-   [ OK ] Server "MY-PC" is running on port 8077 (version 0.7.0, API v1, maps: room).
+   [ OK ] Server "MY-PC" is running on port 8077 (version 0.7.1, API v1, maps: room).
    [info] Network "CampusNet" on Wi-Fi: profile Public
    [FIX ] No firewall rule lets inbound TCP 8077 through on Public networks, ...
               New-NetFirewallRule -DisplayName "AR Portal localization server (TCP 8077)" ...
@@ -699,9 +709,9 @@ what the app's automatic search and its "connected" indicator call.
  "api_version": 1,
  "api_revision": 6,
  "capabilities": ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones"],
- "server_version": "0.7.0",
+ "server_version": "0.7.1",
  "server_name": "MY-PC",
- "version": "0.7.0", "device": "cuda", "device_name": "NVIDIA GeForce GTX 1050 Ti",
+ "version": "0.7.1", "device": "cuda", "device_name": "NVIDIA GeForce GTX 1050 Ti",
  "vram_mb": {"allocated": 56, "peak": 527},
  "models": {"extractor": "aliked-n16", "matcher": "lightglue-aliked", "max_keypoints": 2048},
  "maps": ["tum_room"], "maps_dir": "C:\\...\\data\\maps", "sessions": 0, "uptime_s": 12.3,
@@ -1126,6 +1136,58 @@ shutter; ground truth from a motion-capture system). Reproduce with
 | map cameras within 5 / 10 / 25 cm of ground truth | 120 / 124 / 131 of 164 | 119 / 131 / 158 of 158 |
 | largest camera error vs. ground truth | 26 m | 0.22 m |
 | map size on disk | 71 MB | 71 MB |
+
+### Build time
+
+**How long the build takes does not matter much** (owner, 2026-11-21: the map
+of a room is built once, by the staff, at the very beginning; 5, 10 or 20
+minutes are all fine). So frames are **not** thinned for speed: the map keeps
+about two frames per second of the scan (the sharpest of each window), at most
+200. What matters is that a long scan fits into the memory, that the staff
+sees honest progress, and that a long build is not taken for a hang.
+
+Measured 2026-11-21 through the running server (upload, job, room plan, door,
+visitor), with a recording shaped like a real scan: 85 s, 16 frames a second,
+1080 × 1440, ARCore-like poses (all 1362 TUM frames, enlarged). **A game was
+running on the same graphics card for the first twelve minutes**, so this is
+the slow case:
+
+| | scan of 10 s (32 frames in the map) | scan of 85 s (186 frames selected, 159 in the map) |
+|---|---|---|
+| reading the recording, picking frames, features | 22 s | 66 s + 103 s |
+| matching | 55 s (496 pairs) | 475 s (2415 pairs) |
+| reconstruction (CPU) | 20 s | 504 s |
+| depth, doors, room plan | 120 s (game running) | 51 s |
+| **whole build** | **200 s** | **1205 s (20 min)** |
+| video memory, whole card at the peak | - | 3.8 of 4 GB **together with the game** (the build itself about 1.2 GB, the idle server 0.7 GB) |
+| main memory of the build process | - | 3.7 GB at the highest (read once, during the reconstruction) |
+| result | door 5 - 7 cm off | metric, upright, 25,949 points; a visitor's door 3.7 cm from where the staff put it; 4 of 6 clips "good", 1 "weak", 1 not found |
+
+* **Memory:** a scan of that size fits into 4 GB of video memory even with a
+  game on the card. The frames are reduced to 1024 pixels on the long side
+  before anything else, so the resolution of the phone's video does not change
+  the memory needed; the number of frames is capped at 200.
+* **Several walks through the room** in one recording are fine: the cap of 200
+  frames holds, the frames are then spread thinner over the recording. One
+  recording per room - a second upload replaces the first.
+* **Progress and time left.** The job reports its stage, a percentage and
+  `eta_s`. The shares of the stages follow the amount of work (the worker
+  reports the number of frames and image pairs; the reconstruction grows
+  faster than the number of frames), and the time left is taken from the pace
+  the build itself shows on this machine. Replayed on the log of the 20-minute
+  build, the predicted total was off by 12 % on average and 31 % at worst
+  (with the fixed shares used before: 23 % and 52 %); the same build served to
+  set the proportions, so on another scan expect it to be rougher. In the last
+  part of the reconstruction (final bundle adjustment, about a minute and a
+  half here) the percentage stands still although work goes on.
+* **A long build is not a hang.** The server has no time limit for a build;
+  the "stalls" counter of the panel watches only whether the server itself
+  answers. During the 20 minutes it answered within 0.1 s, except once: 7 s
+  without an answer while the PC had 1 GB of its 16 GB of main memory left
+  (game + build). With the game closed this should not happen; if the panel
+  shows stalls during a build, look at the free main memory first.
+* The app must not give up on its side either: poll `GET /jobs/{id}` for as
+  long as `state` is `running`.
 
 The first column was produced before the two outlier filters existed; with the
 current code its five "jumped" images would be dropped as well. In the second

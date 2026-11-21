@@ -235,6 +235,47 @@ def compute_alignment(lmap: LocMap, observations: list[Observation], opts: Align
     return out
 
 
+DOOR_TRACK_MAX = 200
+
+
+def door_stability(track: list, al: dict | None, frame_id: str | None = None) -> dict | None:
+    """How steady the door stands in one AR session: where it was put after each request, and how far it moved.
+
+    ``track`` is the session's list of earlier positions and is extended here.
+    Every ``/localize`` of a session gives a new alignment, so the door is put
+    anew each time; the distance between two attempts is what a person sees as
+    the door "jumping". The point followed is the door (as the app would place
+    it, AR world, metres), or the origin of the map while the room has no door.
+    A new door, a re-scan (``frame_id``) or another kind of point starts a new
+    series. Nothing is said without a usable alignment.
+    """
+    if not al or al.get("status") != "ok" or al.get("T_arworld_from_map") is None:
+        return None
+    portal = al.get("portal") or {}
+    if portal.get("source") not in (None, "none") and portal.get("position") is not None:
+        point, p = "door", np.asarray(portal["position"], float)
+        key = (point, frame_id, portal.get("source"), portal.get("updated_utc"))
+    else:
+        point, p = "map_origin", np.asarray(al["translation"], float)
+        key = (point, frame_id)
+    if track and track[-1][0] != key:
+        track.clear()
+    track.append((key, p))
+    del track[:-DOOR_TRACK_MAX]
+    pts = np.array([q for _, q in track])
+    med = np.median(pts, axis=0)
+    dist = np.linalg.norm(pts - med, axis=1)
+    return {
+        "point": point,
+        "attempt": len(pts),
+        "position": vec(p),
+        "shift_from_previous_m": round(float(np.linalg.norm(pts[-1] - pts[-2])), 4) if len(pts) > 1 else None,
+        "shift_from_median_m": round(float(dist[-1]), 4) if len(pts) > 1 else None,
+        "spread_m": round(float(np.sqrt(np.mean(dist**2))), 4) if len(pts) > 1 else None,
+        "spread_max_m": round(float(dist.max()), 4) if len(pts) > 1 else None,
+    }
+
+
 def strip_private(d: dict) -> dict:
     return {k: (strip_private(v) if isinstance(v, dict) else v) for k, v in d.items() if not str(k).startswith("_")}
 

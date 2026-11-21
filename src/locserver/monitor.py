@@ -311,6 +311,12 @@ class Monitor:
 
 
 # ------------------------------------------------------------------ flow --- #
+def _about(seconds: float) -> str:
+    """A time left as a person says it: seconds below a minute and a half, then minutes."""
+    return f"{int(round(seconds))} s" if seconds < 90 else f"{int(round(seconds / 60))} min"
+
+
+
 def pick_device(devices: list[dict], prefer: str | None = None) -> dict | None:
     """The device the flow strip follows: the one asked for, else the most telling one that is online."""
     chosen = next((d for d in devices if d["device_id"] == prefer), None) if prefer else None
@@ -360,7 +366,7 @@ def usage_flow(devices: list[dict], maps: list[dict], jobs: list[dict], monitor:
                           (dev or {}).get("state", {}).get("detail") if step == "scanning" else "recording uploaded" if scanned else "walk through the room while recording"))
         if running:
             pct = f"{running['progress'] * 100:.0f} %"
-            steps.append(item("build", "Build the map", "active", f"{running.get('stage') or 'queued'} - {pct}" + (f", about {running['eta_s']} s left" if running.get("eta_s") else "")))
+            steps.append(item("build", "Build the map", "active", f"{running.get('stage') or 'queued'} - {pct}" + (f", about {_about(running['eta_s'])} left" if running.get("eta_s") else "")))
         elif last_build and last_build["state"] == "failed" and not m:
             steps.append(item("build", "Build the map", "problem", (last_build.get("error") or {}).get("message", "the build failed")))
         else:

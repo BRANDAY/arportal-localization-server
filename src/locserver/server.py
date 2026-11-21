@@ -36,6 +36,7 @@ from .responses import (
     Observation,
     anchor_pose_dict,
     compute_alignment,
+    door_stability,
     localization_dict,
     mat,
     parse_ar_pose,
@@ -130,7 +131,7 @@ class State:
             del self.sessions[k]
         s = self.sessions.get(session_id)
         if s is None or s["map_id"] != map_id:
-            s = self.sessions[session_id] = {"map_id": map_id, "observations": [], "created": now}
+            s = self.sessions[session_id] = {"map_id": map_id, "observations": [], "door_track": [], "created": now}
         s["used"] = now
         return s
 
@@ -1175,6 +1176,8 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
         else:
             out["alignment"] = None
         out["frame_id"] = _frame_id(m)
+        # how far the door moved since the earlier requests of this AR session (numbers for a report)
+        out["door_stability"] = door_stability(s["door_track"], out["alignment"], out["frame_id"]) if session_id else None
         out["room_choice"] = room_choice
         # advice for the app's rhythm: an aligned session only refines, and with a line nobody should hurry
         settled = (out.get("alignment") or {}).get("status") == "ok" and ((out.get("alignment") or {}).get("observations_used") or 0) >= 6
@@ -1183,11 +1186,25 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
         out["elapsed_ms"] = round((time.perf_counter() - t_req) * 1000, 1)
         st.archive.write_json(kept, "response.json", out)
         al_out = out.get("alignment") or {}
-        st.monitor.record_localization({
+        steady = out.get("door_stability") or {}
+        row = {
             "device_id": Monitor.resolve_id(request.headers.get("x-device-id") or device_id, request.client.host if request.client else None),
+            "session_id": session_id,
             "map_id": m.map_id, "success": bool(best.success), "quality": best.quality, "reason": best.reason,
-            "num_inliers": int(best.num_inliers), "frames": len(results), "elapsed_ms": out["elapsed_ms"],
-            "alignment": al_out.get("status"), "portal_source": (al_out.get("portal") or {}).get("source"),
+            "frames": len(results), "num_keypoints": int(best.num_keypoints), "num_matches": int(best.num_matches),
+            "num_inliers": int(best.num_inliers), "inlier_ratio": round(float(best.inlier_ratio), 4),
+            "elapsed_ms": out["elapsed_ms"], "waited_ms": load.get("waited_ms"),
+            "alignment": al_out.get("status"), "observations_used": al_out.get("observations_used"),
+            "position_rms_m": al_out.get("position_rms_m"),
+            "portal_source": (al_out.get("portal") or {}).get("source"),
+            "door_point": steady.get("point"), "door_attempt": steady.get("attempt"),
+            "door_shift_m": steady.get("shift_from_previous_m"), "door_shift_from_median_m": steady.get("shift_from_median_m"),
+            "door_spread_m": steady.get("spread_m"),
+        }
+        st.archive.csv_line("localizations.csv", {"time": time.strftime("%Y-%m-%d %H:%M:%S"), **row,
+                                                  "folder": kept.name if kept else None})
+        st.monitor.record_localization({
+            **row,
             "position": out["pose"]["position"] if out.get("pose") else None,
             "forward": [float(v) for v in np.asarray(out["pose"]["T_map_from_cvcam"])[:3, 2]] if out.get("pose") else None,
         })

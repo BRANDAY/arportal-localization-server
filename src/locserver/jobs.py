@@ -38,6 +38,20 @@ FINAL_STATES = ("succeeded", "failed", "cancelled")
 BUILD_PREFIX = ".build-"
 
 
+def build_costs(frames: int, pairs: int) -> dict[str, float]:
+    """What the stages of a map build cost, in seconds on the reference PC (GTX 1050 Ti), from the amount of work.
+
+    Only the proportions matter: the pace of the machine at hand is measured
+    while the build runs. Measured 2026-11-21 on builds of 32 frames (a scan
+    of 10 s: 496 pairs, reconstruction 20 s) and of 186 frames (85 s: 2415
+    pairs, reconstruction 504 s - it grows faster than the number of frames).
+    ``frames`` (reading the recording) is set from its real duration.
+    """
+    frames, pairs = max(1, frames), max(1, pairs)
+    return {"frames": 0.0, "features": 8 + 0.5 * frames, "matching": 0.19 * pairs, "sfm": 0.3 * frames + 0.013 * frames**2,
+            "depth": 25.0, "room_plan": 35.0, "finalize": 5.0}
+
+
 class JobError(Exception):
     def __init__(self, code: str, message: str):
         super().__init__(message)
@@ -66,28 +80,76 @@ class Job:
         self.result: dict | None = None
         self.cancel_requested = False
         self.proc: subprocess.Popen | None = None
+        self.costs: dict[str, float] = dict(STAGES[kind]) if kind in STAGES else {}  # share of each stage; `plan` refines it
+        self.planned = False
+        self.stage_started: float | None = None
+        self.stage_spent: dict[str, float] = {}  # seconds each finished stage took
 
     # ------------------------------------------------------------------ #
-    def report(self, stage: str, fraction: float, message: str = "") -> None:
-        stages = STAGES[self.kind]
-        names = [s for s, _ in stages]
+    def report(self, stage: str, fraction: float, message: str = "", now: float | None = None) -> None:
+        names = [s for s, _ in STAGES[self.kind]]
         if stage not in names:
             return
         k = names.index(stage)
+        now = time.time() if now is None else now
+        if self.stage in names and k < names.index(self.stage):
+            return  # a late message of an earlier stage
+        if stage != self.stage:
+            if self.stage in names and self.stage_started is not None:
+                self.stage_spent[self.stage] = now - self.stage_started
+            self.stage_started = now
         fraction = float(min(1.0, max(0.0, fraction)))
-        overall = sum(w for _, w in stages[:k]) + stages[k][1] * fraction
         self.stage, self.stage_progress = stage, round(fraction, 4)
+        total = sum(self.costs.values())
+        overall = (sum(self.costs[s] for s in names[:k]) + self.costs[stage] * fraction) / total if total > 0 else 0.0
         self.progress = round(max(self.progress, min(0.999, overall)), 4)  # 1.0 is reserved for "succeeded"
         if message:
             self.message = message
+
+    def plan(self, counts: dict, now: float | None = None) -> None:
+        """The worker says how much work the build is (frames, image pairs): the shares of the stages follow from it.
+
+        A scan of ten seconds and one of ninety spend their time very
+        differently (the fixed steps dominate the first, matching and the
+        reconstruction the second), so fixed shares make the bar and the
+        estimate of the time left wrong for one of them.
+        """
+        if self.kind != "build_map":
+            return
+        try:
+            costs = build_costs(int(counts["frames"]), int(counts["pairs"]))
+        except (KeyError, TypeError, ValueError):
+            return
+        now = time.time() if now is None else now
+        spent = self.stage_spent.get("frames")
+        if spent is None and self.stage == "frames" and self.stage_started is not None:
+            spent = now - self.stage_started
+        # reading the recording is over when the plan arrives: it counts with what it really took
+        costs["frames"] = max(1.0, spent or 0.0)
+        self.costs, self.planned = costs, True
+
+    def eta_s(self, now: float | None = None) -> int | None:
+        """Seconds left: the rest of the running stage at the pace it shows, the later stages at the pace of the build so far."""
+        names = [s for s, _ in STAGES[self.kind]]
+        if self.state != "running" or self.stage not in names or self.started is None or self.stage_started is None:
+            return None
+        now = time.time() if now is None else now
+        k, f, t_cur = names.index(self.stage), self.stage_progress, max(0.0, now - self.stage_started)
+        # pace: real seconds per unit of cost, from the stages that are over and the part of this one that is done
+        paced = [s for s in names[:k] if s in self.stage_spent and not (self.planned and s == "frames")]
+        real = sum(self.stage_spent[s] for s in paced) + t_cur
+        cost = sum(self.costs[s] for s in paced) + self.costs[self.stage] * f
+        if cost <= 0 or real < 3.0 or cost < 0.02 * sum(self.costs.values()):
+            return None  # nothing to judge the pace by yet
+        pace = real / cost
+        here = t_cur * (1 - f) / f if f >= 0.1 and t_cur >= 3.0 else self.costs[self.stage] * (1 - f) * pace
+        return int(round(here + sum(self.costs[s] for s in names[k + 1:]) * pace))
 
     def public(self, queue_position: int = 0) -> dict:
         stages = [s for s, _ in STAGES[self.kind]]
         now = time.time()
         elapsed = ((self.finished or now) - self.started) if self.started else 0.0
-        eta = None
-        if self.state == "running" and self.progress >= 0.03:
-            eta = round(elapsed * (1 - self.progress) / self.progress)
+        eta = self.eta_s(now)
         return {
             "job_id": self.job_id, "kind": self.kind, "map_id": self.map_id, "state": self.state,
             "stage": self.stage, "stage_index": stages.index(self.stage) + 1 if self.stage in stages else None,
@@ -340,6 +402,8 @@ class JobManager:
                     continue
                 if "stage" in msg:
                     job.report(msg["stage"], msg.get("p", 0.0), msg.get("msg", ""))
+                elif "plan" in msg:
+                    job.plan(msg["plan"])
                 elif "result" in msg:
                     result = msg["result"]
                 elif "error" in msg:
