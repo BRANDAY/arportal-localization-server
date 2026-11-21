@@ -1116,7 +1116,10 @@ shutter; ground truth from a motion-capture system). Reproduce with
 > during all measurements (`nvidia-smi` showed 38 % GPU utilisation and 2.7 GB
 > of the 4 GB in use while our server was idle). GPU times below are therefore
 > pessimistic and noisy; re-run the evaluation on an idle machine for clean
-> numbers.
+> numbers. The tables below were **not** measured again. One point with a
+> free card (2026-11-21, the game closed, one simulated visitor): the server
+> answered a `/localize` clip of 2.5 s (three frames localised) in 1.1 - 1.8 s,
+> six of six clips "good".
 
 ### Map building
 
