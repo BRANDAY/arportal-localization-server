@@ -26,8 +26,8 @@ Contents: [compatibility](#1-compatibility) · [recording upload](#2-upload-a-ro
 ```json
 {
   "status": "ok", "service": "arportal-localization-server", "api_version": 1,
-  "api_revision": 5,
-  "capabilities": ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint"],
+  "api_revision": 6,
+  "capabilities": ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones"],
   "jobs": {"running": 1, "queued": 0},
   "...": "all v1 fields unchanged"
 }
@@ -41,7 +41,8 @@ Contents: [compatibility](#1-compatibility) · [recording upload](#2-upload-a-ro
   room for every way of recognising it; `frame_id`; the bridge to an external
   positioning service (section 11). `wifi_hint` (revision 5): `/localize`
   finds the room itself when `map_id` is left out, and Wi-Fi networks can be
-  sent as a hint for which room (section 12).
+  sent as a hint for which room (section 12). `several_phones` (revision
+  6): a fair line for `/localize`, `load` in its answer (section 13).
 * Errors are unchanged: HTTP status + `{"detail": "text"}`.
 * Units and frames are unchanged: metres, right-handed, `T_a_from_b`,
   quaternions `[x, y, z, w]`, `rotation_euler_deg` = ViroReact Euler degrees
@@ -119,7 +120,7 @@ changes nothing.
 
 ### How the files are read
 
-As written by the phone (`app/docs/capture-format.md`; checked on two captures
+As written by the phone ([`app/docs/capture-format.md`](https://github.com/BRANDAY/markerless-ar-vr-portal/blob/main/app/docs/capture-format.md) of the app's repository; checked on two captures
 of a Xiaomi 14 Ultra, 2026-11-20 - `tests/test_device_capture.py`):
 
 * The video frames are stored in the sensor's orientation (1920 x 1080
@@ -156,7 +157,7 @@ snapshot). Requirements: vertex coordinates in the AR world frame of the
 (`v`, `f`) and PLY (ASCII or binary little-endian, `vertex` + optional `face`).
 The app sends `world_mesh.ply` with `mesh_format=ply`: binary little-endian,
 vertex properties `float x, y, z, confidence`, faces as
-`list uchar int vertex_indices` (`app/docs/capture-format.md`, section 5). That
+`list uchar int vertex_indices` ([`app/docs/capture-format.md`](https://github.com/BRANDAY/markerless-ar-vr-portal/blob/main/app/docs/capture-format.md) of the app's repository, section 5). That
 layout is read (extra vertex properties such as `confidence` are skipped);
 checked with the two meshes of the first phone captures, converted the way the
 app converts them (6,560 and 50,321 vertices). What has **not** been seen yet is
@@ -540,7 +541,9 @@ New optional form field:
 | `max_rooms` | int (default 3, at most 6) | without `map_id`: how many rooms are tried |
 | `only_with_door` | bool (default `false`) | without `map_id`: only rooms whose door a staff member placed (what a visitor wants) |
 
-The answer always carries `"room_choice"` (section 12) and `"frame_id"`.
+The answer always carries `"room_choice"` (section 12), `"frame_id"` and
+`"load"` (section 13: how long the request stood in line, and when to send the
+next one).
 
 When the alignment is complete (`alignment.status == "ok"`), `alignment` gains:
 
@@ -656,11 +659,12 @@ Both modes send `X-Device-Role` (section 9.1).
 | Room plan: floor, ceiling, walls, corners | done | synthetic rooms (exact ground truth); public TUM sequence against its Kinect depth |
 | Openings: geometry (open doorways) | done | synthetic rooms only |
 | Openings: image detector (closed doors) | done | synthetic boxes in tests; the real detector only looked at on TUM frames (no door ground truth there) |
-| `mesh` input | OBJ/PLY reader done, tested on hand-made files | waits for `app/docs/capture-format.md` and a real snapshot |
+| `mesh` input | OBJ/PLY reader done, tested on hand-made files | waits for [`app/docs/capture-format.md`](https://github.com/BRANDAY/markerless-ar-vr-portal/blob/main/app/docs/capture-format.md) of the app's repository and a real snapshot |
 | `/maps/{id}/portal`, `/localize` / `/align` / `/sessions` additions | done | tests |
 | Staff door with size, `confirmed` / `suggested`, saving in the recording's session, `X-Device-Role`, rename / delete a room (sections 5, 10) | done (server 0.4.0) | `tests/test_staff_door.py`; a run of `scripts/simulate_phone.py` as staff device and as visitor device against the running server. Not with a phone |
 | One door for every way: `frame_id`, the room's place at an external service, the bridge (`PATCH ... vps.bridge`, `POST /maps/{id}/vps/bridge`), dropped on a new scan (section 11) | done (server 0.5.0) | `tests/test_service_bridge.py` (made-up service frame with known truth); `scripts/simulate_phone.py --vps-bridge` in the recording's session and in a later one. **No real answer of the service has been seen**: its frame conventions are an assumption |
 | Which room: Wi-Fi networks left with a room, `/localize` without `map_id`, `room_choice`, `POST /maps/candidates` (section 12) | done (server 0.6.0) | `tests/test_wifi_hint.py`, `tests/test_wifi_rooms.py`; `scripts/simulate_phone.py` against the running server (five rooms, two of them with a staff door): with the made-up networks the right room was tried first and found, 0.75 s for the search; without them the picture led to the other scan of the same real room. **Never with a real phone or real networks** |
+| Several phones at once: line in arrival order, fewer frames under load, `load`, `/health` `localize`; keeping what the phones send (section 13) | done (server 0.7.0) | `tests/test_several_phones.py`, `tests/test_archive.py`; five simulated phones at once against the running server, also during a build. **Not with real phones** |
 | Section 9: device headers, `POST /devices/{id}/log`, `GET /devices`, log read-back, `/ui` | done (server 0.3.0) | tests; a run of `scripts/simulate_phone.py` against the running server. No log from the real app has been received yet |
 
 **Not verified: anything on a real room recorded with the phone.** No such
@@ -1207,6 +1211,79 @@ localisations instead of asking the staff phone.
 
 ---
 
+## 13. Several phones at once
+
+Capability `several_phones` (revision 6, server 0.7.0).
+
+**Owner's decision (2026-11-21):** the server has to work with **about five
+phones at the same time** - a few test phones looking at one door. It is not
+built for fifty; if that is ever needed, the design is thought over again.
+
+The server has one graphics card and localises one clip at a time. What it
+does so that five phones are served well:
+
+* **A line, first come first served.** Requests to `/localize` wait their turn
+  in the order they arrived; none can be overtaken again and again.
+* **Less work per turn when others wait.** With somebody in line a clip is
+  localised with fewer frames: two while the session still looks for the room,
+  one once it is aligned (three or more observations) and only refines. With
+  nobody waiting it is what the request asked for (`max_frames`, default 3).
+* **The answer says what happened**, and gives advice for the rhythm:
+
+```json
+"load": {"ahead": 2, "waited_ms": 1840.5, "frames_asked": 3, "frames_used": 2, "next_request_after_s": 2.0}
+```
+
+  `ahead`: requests that were before this one (in line or being served);
+  `waited_ms`: time in line; `next_request_after_s`: **when to send the next
+  clip** - 1 s while the session is not settled, 5 s once it is (alignment
+  `ok` from six or more frames: more clips only refine), doubled when the line
+  is long. It is advice: an app that follows it keeps the line short for the
+  others; nothing is refused if it does not.
+* `GET /health` gains `"localize": {"running": 0|1, "waiting": n, "served": n,
+  "recent_wait_ms": median, "recent_wait_ms_longest": ..., "recent_work_ms": ...}`
+  (the panel shows it as "Phones in line").
+
+Measured with five simulated visitor phones at once, each in its own AR
+session, six clips of 2.5 s each (GTX 1050 Ti; **a game was running on the
+same card during all of these runs**, so a free card will be faster):
+
+| | door shown after | answer time, median / longest | failed requests |
+|---|---|---|---|
+| before (server 0.6.0, plain lock) | 4.2 - 11.2 s | 7.5 s / 18.9 s | 0 |
+| now | 3.1 - 4.7 s | 2.8 s / 5.2 s | 0 |
+| now, while the server builds another room | 21 - 23 s | 2.1 s / 23.0 s | 0 |
+
+All five phones got the door in every run, 5.4 - 7.2 cm from where the staff
+put it.
+
+**What to know for a test with several phones:**
+
+* **Do not scan a room while visitors are localising.** The build runs on the
+  same card: every phone's first answer took over 20 s in that run. It still
+  worked, but it looks like a hang. Scan first, then let the visitors in.
+* A phone that has its door should slow down (`next_request_after_s`). Five
+  phones that all keep sending clips as fast as they can get an answer every
+  3 s instead of every 1 - 2 s; the door does not get better from that.
+* All phones see **the same door record**; each has its own AR session and its
+  own alignment, so the door stands at the same place in the room for all of
+  them only as well as each phone's alignment is (centimetres, see above).
+* Sessions live in the server's memory (30 minutes without a request, and
+  they do not survive a restart of the server - the phone then simply
+  localises again).
+* Not covered: fairness between phones beyond the order of arrival, limits per
+  device, more than one graphics card.
+
+**Keeping what the phones send** (for looking at a failure afterwards): start
+the server with `--keep-incoming [FOLDER]` (or `LOCSERVER_KEEP_INCOMING`).
+Then every `/localize` leaves a folder with the clip, its `session.jsonl`, the
+form fields and the answer; recordings are kept with their build log even when
+refused or replaced by a newer one; `requests.jsonl` has one line per request
+with status, duration and the reason of a refusal. `GET /health` says
+`"keeps_incoming": true`. Off by default. Nothing changes for the app.
+
+---
+
 ## Change log
 
 * 2026-11-20 — first draft.
@@ -1216,7 +1293,7 @@ localisations instead of asking the staff phone.
 * 2026-11-20 — section 9 (devices, device log) drafted; capability `device_log`.
 * 2026-11-20 — section 9 implemented as drafted (server 0.3.0); new capabilities
   `device_log` and `monitor_ui` (the latter: the server has the panel at `/ui`).
-* 2026-11-21 — first phone captures (app/docs/capture-format.md): section 2 says
+* 2026-11-21 — first phone captures ([app/docs/capture-format.md](https://github.com/BRANDAY/markerless-ar-vr-portal/blob/main/app/docs/capture-format.md)): section 2 says
   how the files are read; a recording that is too short or does not move is
   refused at upload with `X-Error-Code`; the minimum of 10 pose lines became
   30 lines and 3 s; mesh layout of the app confirmed.
@@ -1258,6 +1335,14 @@ localisations instead of asking the staff phone.
   gains `wifi` (counts only - addresses are never returned). **Changed
   behaviour:** `/localize` without `map_id` on a server with several rooms
   used to answer `422`; it now looks for the room. Capability `wifi_hint`.
+* 2026-11-21 — **revision 6, server 0.7.0: several phones at once** (owner:
+  about five phones looking at one door, not fifty). New section 13.
+  `/localize` requests are served in the order of arrival; under load a clip
+  is localised with fewer frames; the answer gains `load` (with
+  `next_request_after_s`, advice for the app's rhythm); `GET /health` gains
+  `localize` and `keeps_incoming`. Server option `--keep-incoming` keeps
+  everything the phones send. Capability `several_phones`. Nothing was removed
+  or changed in meaning.
 * 2026-11-21 — room plan with `status: "partial"`: `reason` now names what was
   missing and what to do when wall-like surfaces were seen over too little of
   their height (text for the user, e.g. "fewer than two walls were found: 2 more

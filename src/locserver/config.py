@@ -32,6 +32,14 @@ def work_dir() -> Path:
     return _env_path("LOCSERVER_WORK", PROJECT_ROOT / "data" / "work")
 
 
+def keep_incoming_dir() -> Path | None:
+    """Where everything the phones send is kept (env LOCSERVER_KEEP_INCOMING: 1 = <work>/incoming, or a folder). Off by default."""
+    v = (os.environ.get("LOCSERVER_KEEP_INCOMING") or "").strip()
+    if v.lower() in ("", "0", "no", "false", "off"):
+        return None
+    return work_dir() / "incoming" if v.lower() in ("1", "yes", "true", "on") else Path(v)
+
+
 def datasets_dir() -> Path:
     return _env_path("LOCSERVER_DATASETS", PROJECT_ROOT / "data" / "datasets")
 

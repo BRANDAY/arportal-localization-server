@@ -10,6 +10,12 @@ It is the self-hosted alternative to ViroReact's cloud VPS / Google Cloud
 Anchors for the "Markerless AR-to-VR Portal" proof of concept. It is an
 independent project: the mobile app talks to it over HTTP on the local Wi-Fi.
 
+**Where it belongs.** This is the server of the app in
+<https://github.com/BRANDAY/markerless-ar-vr-portal> (a ViroReact app for
+Android); that repository includes this one as a submodule. The server can be
+installed and run on its own - nothing here needs the app's files - and any
+client that speaks the HTTP API below can use it.
+
 ```
             ONCE (offline)                                EVERY APP SESSION (online)
 
@@ -52,7 +58,7 @@ git clone <repository url> ; cd localization-server
 
 # 2. environment (Python 3.13 and all packages; ~3 GB download, ~10 GB disk)
 uv sync
-uv run pytest                               # 172 tests, no GPU needed, about 5 minutes (4 of them need the phone captures and are skipped without them)
+uv run pytest                               # 180 tests, no GPU needed, about 5 minutes (4 of them need the phone captures and are skipped without them)
 
 # 3. a map: either your own room video ...
 uv run locserver-build-map data\input\room.mp4 --map-id room
@@ -94,6 +100,19 @@ networks the phone sees only put the rooms in an order (the staff phone
 leaves the networks seen in a room with it); where the phone stands is found
 from the picture alone, and without any Wi-Fi the rooms are tried by how alike
 the pictures are. Section 12 of the API document.
+
+**Several phones at once (server 0.7.0).** The server is meant for about five
+phones looking at one door at the same time (not fifty): `/localize` requests
+are served in the order they arrive, a clip costs less work while others
+wait, and each answer says how long it stood in line and when to send the
+next clip. Do not scan a room while visitors are localising - the build uses
+the same graphics card. Section 13 of the API document.
+
+**Looking at a failure afterwards.** `uv run locserver-serve --panel
+--keep-incoming E:\VR-FESB\incoming` keeps everything the phones send: every
+clip with its answer, every recording with its build log (also a refused
+one), and one line per request in `requests.jsonl`. Recordings of a real room
+are private - keep that folder outside the repository.
 
 **State of verification (2026-11-21).** Everything runs end to end with the
 simulated phones and with public test data. From a real phone the server has so
@@ -172,7 +191,7 @@ COLMAP binary, ffmpeg, Docker or compiler is needed.
 ```powershell
 cd localization-server
 uv sync            # creates .venv and installs everything (~3 GB download)
-uv run pytest      # 172 tests, no GPU needed, about 5 minutes
+uv run pytest      # 180 tests, no GPU needed, about 5 minutes
 ```
 
 By default everything stays inside the project folder or in the normal
@@ -396,6 +415,7 @@ uv run python scripts\simulate_phone.py --role staff --keep-map        # staff a
 uv run python scripts\simulate_phone.py --door suggested               # the staff accepts the doorway the server found (if it found one)
 uv run python scripts\simulate_phone.py --vps-bridge                   # the staff also measures the bridge to a made-up second positioning service
 uv run python scripts\simulate_phone.py --role visitor --find-room picture   # a visitor without Wi-Fi: the rooms are tried by how alike the pictures are
+uv run python scripts\simulate_phone.py --role visitor --visitors 5          # five visitor phones at the same time, one door
 ```
 
 What happens, and what you see in the panel:
@@ -465,6 +485,8 @@ Result on the development PC (GTX 1050 Ti), 2026-11-21:
 | ...the same, measured **in the AR session that recorded the room** (one more build, 200 s) | the server's estimate 2.1 cm and 0.20 deg; really 1.1 cm off at the door; a visitor's door through the made-up service: 1.2 cm from where the staff put it (through this server: 7.1 cm) |
 | **Which room** (server 0.6.0; five rooms on the server, two with a staff door - `sim_room` and `tum_room` are scans of the same real room): the visitor's first clip names no room and carries made-up Wi-Fi networks | the networks put `sim_room` first (score 0.53; nothing known for `tum_room`); found at the first try, 713 inliers, 0.75 s for the search |
 | ...a second visitor without Wi-Fi (`--find-room picture`) | the picture led to `tum_room` first (841 inliers) - the other scan of the same real room, a correct recognition and still not the room of the visit: what the hint is for |
+| **Five visitor phones at once** (server 0.7.0, `--visitors 5`, each its own AR session, six clips each) | all five got the door after 3.1 - 4.7 s; answer time median 2.8 s, longest 5.2 s; no failed request; door 5.4 - 7.0 cm from where the staff put it. Before the line was made fair (0.6.0): 4.2 - 11.2 s, median 7.5 s, longest 18.9 s |
+| ...the same five while the server builds another room | all five got the door, but only after 21 - 23 s (the first answer waits for the card); afterwards 2.1 s median; no failed request |
 | Server during these runs | no stall; no failed request |
 
 ---
@@ -526,7 +548,7 @@ automatically", which asks every address of the phone's own /24 network for
 
    ```
    [info] LAN address: http://192.168.1.50:8077   (Wi-Fi)
-   [ OK ] Server "MY-PC" is running on port 8077 (version 0.6.0, API v1, maps: room).
+   [ OK ] Server "MY-PC" is running on port 8077 (version 0.7.0, API v1, maps: room).
    [info] Network "CampusNet" on Wi-Fi: profile Public
    [FIX ] No firewall rule lets inbound TCP 8077 through on Public networks, ...
               New-NetFirewallRule -DisplayName "AR Portal localization server (TCP 8077)" ...
@@ -675,11 +697,11 @@ what the app's automatic search and its "connected" indicator call.
 {"status": "ok",
  "service": "arportal-localization-server",
  "api_version": 1,
- "api_revision": 5,
- "capabilities": ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint"],
- "server_version": "0.6.0",
+ "api_revision": 6,
+ "capabilities": ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones"],
+ "server_version": "0.7.0",
  "server_name": "MY-PC",
- "version": "0.6.0", "device": "cuda", "device_name": "NVIDIA GeForce GTX 1050 Ti",
+ "version": "0.7.0", "device": "cuda", "device_name": "NVIDIA GeForce GTX 1050 Ti",
  "vram_mb": {"allocated": 56, "peak": 527},
  "models": {"extractor": "aliked-n16", "matcher": "lightglue-aliked", "max_keypoints": 2048},
  "maps": ["tum_room"], "maps_dir": "C:\\...\\data\\maps", "sessions": 0, "uptime_s": 12.3,

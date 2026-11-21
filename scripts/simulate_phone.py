@@ -46,6 +46,7 @@ import argparse
 import json
 import secrets
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -72,6 +73,7 @@ class Phone:
             "X-Device-Role": role,
         })
         self.name, self.app_version, self.speed = name, app_version, speed
+        self.tag = ""  # put in front of the printed lines when several phones run at once
         self.state: dict = {"step": "connecting", "tracking": "UNAVAILABLE", "map_id": None, "detail": None}
         self.pending: list[dict] = []
         self.seq = 0
@@ -85,7 +87,7 @@ class Phone:
         self.pending.append({"seq": self.seq, "t_ms": int(time.time() * 1000), "level": level, "type": kind, "message": message,
                              **({"data": data} if data else {})})
         self.pending = self.pending[-500:]
-        print(f"  [{level:5s}] {kind:9s} {message}", flush=True)
+        print(f"  {self.tag}[{level:5s}] {kind:9s} {message}", flush=True)
         if level == "error" or len(self.pending) >= 20:
             self.flush()
 
@@ -489,6 +491,8 @@ def visitor(phone: Phone, a, clips: list, S: np.ndarray, what: str) -> tuple[boo
     phone.log("localize", "localisation started (new AR session, this device never scanned)")
     visit = f"{phone.session_id}-ar0"
     alignment, placed, last_T, door = None, False, None, None
+    stats: dict = {"clip_ms": [], "clips_good": 0, "requests_failed": 0, "door_after_s": None, "queue_ms": []}
+    t_visit = time.time()
     room_known = a.find_room == "off"  # otherwise the first clip does not say which room: the server finds it
     my_wifi = wifi_seen(np.random.default_rng(9)) if a.find_room == "wifi" else None
     if my_wifi:
@@ -499,9 +503,14 @@ def visitor(phone: Phone, a, clips: list, S: np.ndarray, what: str) -> tuple[boo
     for i, (clip_dir, T_ar, used) in enumerate(clips):
         last_T = T_ar
         out, ms = send_clip(phone, a.map_id if room_known else None, visit, clip_dir, my_wifi)
+        stats["clip_ms"].append(round(ms))
         if out is None:
+            stats["requests_failed"] += 1
             phone.idle(a.localize_interval)
             continue
+        stats["clips_good"] += int(bool(out["success"]) and out["quality"] == "good")
+        if (out.get("load") or {}).get("waited_ms") is not None:
+            stats["queue_ms"].append(round(out["load"]["waited_ms"]))
         if not room_known:
             rc = out.get("room_choice") or {}
             tried = [c for c in rc.get("candidates") or [] if c.get("tried")]
@@ -527,6 +536,7 @@ def visitor(phone: Phone, a, clips: list, S: np.ndarray, what: str) -> tuple[boo
             alignment, door = al, al.get("portal") or {}
             if not placed and (al.get("observations_used") or 0) >= 2 and door.get("confirmed"):
                 placed = True
+                stats["door_after_s"] = round(time.time() - t_visit, 1)
                 phone.set("portal_placed", detail=f"door from the server ({door.get('source')})")
                 phone.log("portal", f"alignment accepted (position rms {(al.get('position_rms_m') or 0) * 100:.1f} cm) - the staff's door is shown "
                                     f"in AR, {door['width']:.2f} x {door['height']:.2f} m")
@@ -575,7 +585,63 @@ def visitor(phone: Phone, a, clips: list, S: np.ndarray, what: str) -> tuple[boo
         phone.set("portal_placed", detail="back in the real room")
     phone.log("app", "visitor part finished")
     phone.flush()
+    verdict.update(stats)
     return placed, verdict
+
+
+def many_visitors(a, seq, info: dict, folder: Path, S: np.ndarray, what: str) -> bool:
+    """Several visitor phones at once: every one in its own AR session and at its own place, all for the same door."""
+    plans = clip_plans(info, a.localize_count, a.clips_from)
+    runs = []
+    for i in range(a.visitors):
+        # another AR world per phone (each app started somewhere else), and the clips in another order (each stands elsewhere)
+        S_i = g.make_T(g.rot_y(np.radians(25.0 * i)), [0.4 * i, 0.05 * i, -0.3 * i]) @ S
+        clips = []
+        for k, plan in enumerate(plans[i % len(plans):] + plans[:i % len(plans)]):
+            images, poses, times, used = seq.take(plan)
+            if len(images) >= 5:
+                clip_dir = folder / "clips" / f"v{i + 1}" / f"clip{k}"
+                write_phone_files(clip_dir, images, [S_i @ T for T in poses], times, seq.intrinsics)
+                clips.append((clip_dir, S_i @ poses[-1], used))
+        phone = Phone(a.server, f"sim-visitor-{i + 1}", f"Visitor phone {i + 1}", "simulator 1.3", a.speed, role="visitor")
+        phone.tag = f"v{i + 1} "
+        runs.append({"phone": phone, "clips": clips, "S": S_i, "ok": False, "verdict": {}})
+    print(f"{a.visitors} visitor phones at once, {a.stagger:g} s apart, {a.localize_count} clips each; room {a.map_id!r}")
+
+    def run(r: dict, delay: float) -> None:
+        time.sleep(delay / a.speed)
+        try:
+            r["ok"], r["verdict"] = visitor(r["phone"], a, r["clips"], r["S"], what)
+        except Exception as e:  # one phone's failure must show in the table, not end the others
+            r["verdict"] = {"alignment": f"crashed: {type(e).__name__}: {e}"}
+
+    t0 = time.time()
+    threads = [threading.Thread(target=run, args=(r, i * a.stagger), daemon=True) for i, r in enumerate(runs)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    total = time.time() - t0
+
+    print("\nphone  door after  clips good  answer time ms (median / longest)  waited for the GPU ms (longest)  door off cm  failed requests")
+    every_ms: list[int] = []
+    for i, r in enumerate(runs):
+        v = r["verdict"]
+        ms = v.get("clip_ms") or [0]
+        every_ms += ms
+        off = v.get("door_position_error_m")
+        print(f"  v{i + 1}   {str(v.get('door_after_s')) + ' s' if v.get('door_after_s') is not None else 'no door':>9}  "
+              f"{v.get('clips_good', 0)} of {len(r['clips'])}      {int(np.median(ms)):>6} / {max(ms):<6}                "
+              f"{max(v.get('queue_ms') or [0]):>8}                    {'-' if off is None else format(off * 100, '.1f'):>6}       {v.get('requests_failed', 0)}")
+    summary = {
+        "visitors": a.visitors, "with_door": sum(1 for r in runs if r["ok"]), "seconds": round(total, 1),
+        "answer_ms_median": int(np.median(every_ms)), "answer_ms_longest": max(every_ms),
+        "door_after_s_longest": max((r["verdict"].get("door_after_s") or 0) for r in runs),
+        "door_off_cm_worst": max((round((r["verdict"].get("door_position_error_m") or 0) * 100, 1)) for r in runs),
+        "requests_failed": sum(r["verdict"].get("requests_failed", 0) for r in runs),
+    }
+    print(json.dumps(summary, indent=1))
+    return summary["with_door"] == a.visitors
 
 
 def main() -> int:
@@ -601,6 +667,9 @@ def main() -> int:
                          "similarity; 'off' = the visitor names the room")
     ap.add_argument("--vps-bridge", action="store_true",
                     help="the staff also measures the bridge to a made-up second positioning service; visitors then check the same door through it")
+    ap.add_argument("--visitors", type=int, default=1,
+                    help="visitor phones at the same time (each its own device, AR session and place in the room), all looking at one door")
+    ap.add_argument("--stagger", type=float, default=2.0, help="with --visitors: seconds between the phones' starts")
     ap.add_argument("--localize-count", type=int, default=6, help="number of 2.5 s clips sent to /localize")
     ap.add_argument("--localize-interval", type=float, default=1.0, help="pause between /localize requests, seconds")
     ap.add_argument("--clips-from", type=int, default=None,
@@ -638,6 +707,8 @@ def main() -> int:
         phone.set(map_id=a.map_id)
         print(f"staff device {phone.device_id!r} ({phone.name}), session {phone.session_id}, server {phone.server}")
         ok = staff(phone, a, folder, info, T_last, clips, S)
+    if ok and a.role in ("both", "visitor") and a.visitors > 1:
+        return 0 if many_visitors(a, seq, info, folder, S, what) else 1
     if ok and a.role in ("both", "visitor"):
         phone = Phone(a.server, a.device_id if a.device_id and a.role == "visitor" else "sim-visitor-1",
                       a.name if a.name and a.role == "visitor" else "Visitor phone", "simulator 1.2", a.speed, role="visitor")

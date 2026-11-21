@@ -16,13 +16,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse
 from starlette.concurrency import run_in_threadpool
 
 from . import API_VERSION, SERVICE_ID, __version__, bridge, config, netinfo, wifihint
 from . import geometry as g
+from .archive import Archive
 from .capture import Frame, VideoCapture, rotate_image_cw, rotate_intrinsics_cw, sharpness
 from .features import EXTRACTOR_NAME, MATCHER_NAME, FeaturePipeline
+from .gate import Gate, frames_for
 from .jobs import JobManager
 from .localize import DeviceCalibrationStore, LocalizeOptions, Localizer
 from .mapstore import LocMap, check_id, list_map_dirs, load_map, utc_now
@@ -47,17 +51,17 @@ MAX_VIDEO_BYTES = 150 * 2**20
 SESSION_TTL_S = 30 * 60
 SESSION_MAX_OBS = 60
 MAX_MESH_BYTES = 200 * 2**20
-CAPABILITIES = ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint"]
+CAPABILITIES = ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones"]
 UI_FILE = Path(__file__).parent / "ui" / "index.html"
 UNTRACKED_PREFIXES = ("/ui", "/monitor", "/favicon", "/docs", "/openapi")  # the panel itself is not a device
-API_REVISION = 5
+API_REVISION = 6
 MAX_ROOMS_TRIED = 6  # rooms one /localize request may try when it has to find the room itself
 
 
 class State:
     def __init__(self, maps_dir: Path, device: str = "auto", max_keypoints: int = 2048, pipe=None, localizer=None,
                  calibration_dir: Path | None = None, server_name: str | None = None, work_dir: Path | None = None,
-                 job_runner=None):
+                 job_runner=None, keep_incoming: Path | None = None):
         """``pipe`` / ``localizer`` / ``job_runner`` can be injected (the API tests use stubs without models)."""
         self.maps_dir = Path(maps_dir)
         self.work_dir = Path(work_dir or config.work_dir())
@@ -69,10 +73,12 @@ class State:
         self.localizer = localizer or Localizer(self.pipe, self.calib, self.loc_opts)
         self.maps: dict[str, LocMap] = {}
         self.sessions: dict[str, dict] = {}
-        self.gpu_lock = threading.Lock()  # one inference at a time (4 GB VRAM)
+        self.gpu_lock = Gate()  # one inference at a time (4 GB VRAM), first come first served
         self.started = time.time()
         self.reload()
         self.jobs = JobManager(self.maps_dir, self.work_dir, self.reload_one, device, job_runner)
+        self.archive = Archive(keep_incoming)
+        self.jobs.keep_inputs = self.archive.enabled
         self.monitor = Monitor(self.work_dir)
         self.watchdog = LoopWatchdog(self.work_dir)
         self._points_cache: dict = {}
@@ -268,7 +274,7 @@ def pick_clip_frames(frames: list[Frame], n: int) -> list[Frame]:
 
 def create_app(state: State | None = None, maps_dir: Path | None = None, device: str = "auto",
                server_name: str | None = None) -> FastAPI:
-    st = state or State(maps_dir or config.maps_dir(), device, server_name=server_name)
+    st = state or State(maps_dir or config.maps_dir(), device, server_name=server_name, keep_incoming=config.keep_incoming_dir())
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -299,9 +305,27 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
             path = request.url.path
             if not path.startswith(UNTRACKED_PREFIXES):
                 h = request.headers
+                quiet = status < 400 and (path == "/health" or path.endswith("/log") or (request.method == "GET" and path.startswith("/jobs/")))
+                if st.archive.enabled and not quiet:
+                    st.archive.request_line({
+                        "t": utc_now(), "method": request.method, "path": path, "status": status,
+                        "ms": round((time.perf_counter() - t0) * 1000, 1), "device": h.get("x-device-id"),
+                        "session": h.get("x-session-id"), "role": h.get("x-device-role"), "app": h.get("x-app-version"),
+                        "error": getattr(request.state, "error_detail", None)})
                 st.monitor.touch(h.get("x-device-id"), request.client.host if request.client else None, request.method, path, status,
                                  (time.perf_counter() - t0) * 1000, h.get("x-device-name"), h.get("x-session-id"), h.get("x-app-version"),
                                  h.get("x-device-role"))
+
+    @app.exception_handler(HTTPException)
+    async def remember_refusal(request: Request, exc: HTTPException):
+        """The usual answer; the reason is also noted for requests.jsonl of the archive."""
+        request.state.error_detail = exc.detail
+        return await http_exception_handler(request, exc)
+
+    @app.exception_handler(RequestValidationError)
+    async def remember_bad_request(request: Request, exc: RequestValidationError):
+        request.state.error_detail = str(exc.errors())[:600]
+        return await request_validation_exception_handler(request, exc)
 
     @app.post("/devices/{device_id}/log")
     async def device_log_post(device_id: str, request: Request):
@@ -368,7 +392,7 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
                 "os": f"{platform.system()} {platform.release()}", "uptime_s": round(time.time() - st.started, 1),
                 "urls": [f"http://{a}:{port}" for a in _addresses()], "port": port, "sessions": len(st.sessions),
                 "models": {"extractor": EXTRACTOR_NAME, "matcher": MATCHER_NAME},
-                "stalls": st.watchdog.public(),
+                "stalls": st.watchdog.public(), "localize": st.gpu_lock.status(),
             },
             "devices": devices_, "maps": maps_, "jobs": jobs_,
             "localizations": st.monitor.recent_localizations(30),
@@ -432,6 +456,8 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
             "api_revision": API_REVISION,
             "capabilities": CAPABILITIES,
             "jobs": st.jobs.counts(),
+            "localize": st.gpu_lock.status(),
+            "keeps_incoming": st.archive.enabled,
         }
 
     @app.get("/maps")
@@ -649,7 +675,9 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
                 _save_upload(mesh, mpath, MAX_MESH_BYTES, "the mesh")
                 params["mesh"] = str(mpath)
             refuse_if_busy()
-        except HTTPException:
+        except HTTPException as e:
+            if st.archive.enabled:  # what was wrong with it can be looked at later
+                st.archive.take(d, f"recording-refused-{map_id}", device_id, {"status": e.status_code, "detail": e.detail, "map_id": map_id})
             shutil.rmtree(d, ignore_errors=True)
             raise
         st.jobs.submit(job_id, "build_map", map_id, params)
@@ -1017,13 +1045,24 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
                 raise HTTPException(422, "intrinsics need all of fx, fy, cx, cy")
             intr = dict(fx=fx, fy=fy, cx=cx, cy=cy, width=width, height=height)
 
+        kept = st.archive.new("localize", request.headers.get("x-device-id") or device_id, session_id)
+        st.archive.write_json(kept, "request.json", {
+            "t": utc_now(), "map_id": map_id, "session_id": session_id, "device_id": device_id,
+            "headers": {k: request.headers.get(k) for k in ("x-device-id", "x-device-name", "x-session-id", "x-app-version", "x-device-role")},
+            "intrinsics": intr, "intrinsics_mode": intrinsics_mode, "image_rotation_cw": image_rotation_cw, "max_frames": max_frames,
+            "ar_pose": ar_pose, "ar_position": ar_position, "ar_rotation": ar_rotation, "ar_forward": ar_forward, "ar_up": ar_up,
+            "wifi_networks_sent": len(seen), "max_rooms": max_rooms, "only_with_door": only_with_door,
+            "upload": "image" if image is not None else "video", "has_session_jsonl": session_jsonl is not None})
+
         # ---- decode the upload into upright frames (+ per-frame AR poses) ---- #
+        load: dict = {"frames_asked": 1, "frames_used": 1}
         frames: list[Frame] = []
         pairing = None
         if image is not None:
             data = image.file.read(MAX_IMAGE_BYTES + 1)
             if len(data) > MAX_IMAGE_BYTES:
                 raise HTTPException(413, "image too large")
+            st.archive.write_bytes(kept, "image.jpg", data)
             img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
             if img is None:
                 raise HTTPException(422, "cannot decode `image` (send JPEG or PNG)")
@@ -1062,16 +1101,23 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
                 except (IOError, ValueError) as e:
                     raise HTTPException(422, f"cannot read the clip: {e}")
             finally:
+                st.archive.copy(kept, tmp / "video.mp4")
+                st.archive.copy(kept, tmp / "session.jsonl")
                 shutil.rmtree(tmp, ignore_errors=True)
             if not decoded:
                 raise HTTPException(422, "the clip contains no decodable frames")
-            frames = pick_clip_frames(decoded, max(1, min(int(max_frames), 8)))
+            asked = max(1, min(int(max_frames), 8))
+            known = st.sessions.get(session_id) if session_id else None
+            aligned = len(known["observations"]) if known and (m is None or known["map_id"] == m.map_id) else 0
+            frames = pick_clip_frames(decoded, frames_for(asked, st.gpu_lock.waiting, aligned))
+            load.update(frames_asked=min(asked, len(decoded)), frames_used=len(frames))
             if pairing is None and T_ar_req is not None:
                 pairing = "assumed_static"  # one pose for the whole clip
 
         # ---- localise ---- #
         results = []
-        with st.gpu_lock:
+        with st.gpu_lock as turn:
+            load.update(ahead=turn["ahead"], waited_ms=turn["waited_ms"])
             try:
                 rest = frames
                 if m is None:  # find the room with the first (sharpest) frame, then go on in that room
@@ -1130,7 +1176,12 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
             out["alignment"] = None
         out["frame_id"] = _frame_id(m)
         out["room_choice"] = room_choice
+        # advice for the app's rhythm: an aligned session only refines, and with a line nobody should hurry
+        settled = (out.get("alignment") or {}).get("status") == "ok" and ((out.get("alignment") or {}).get("observations_used") or 0) >= 6
+        load["next_request_after_s"] = (10.0 if load["ahead"] >= 2 else 5.0) if settled else (2.0 if load["ahead"] >= 2 else 1.0)
+        out["load"] = load
         out["elapsed_ms"] = round((time.perf_counter() - t_req) * 1000, 1)
+        st.archive.write_json(kept, "response.json", out)
         al_out = out.get("alignment") or {}
         st.monitor.record_localization({
             "device_id": Monitor.resolve_id(request.headers.get("x-device-id") or device_id, request.client.host if request.client else None),
@@ -1163,7 +1214,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
     ap.add_argument("--log-level", default="INFO")
     ap.add_argument("--panel", action="store_true", help="also open the monitoring panel in a desktop window")
+    ap.add_argument("--keep-incoming", nargs="?", const="1", default=None, metavar="FOLDER",
+                    help="keep everything the phones send (clips, recordings, answers) - in FOLDER, or in <work>/incoming "
+                         "(env LOCSERVER_KEEP_INCOMING)")
     a = ap.parse_args(argv)
+    if a.keep_incoming:
+        import os
+
+        os.environ["LOCSERVER_KEEP_INCOMING"] = a.keep_incoming
     config.setup_logging(a.log_level)
     app = create_app(maps_dir=Path(a.maps_dir) if a.maps_dir else None, device=a.device, server_name=a.name)
     st: State = app.state.locserver

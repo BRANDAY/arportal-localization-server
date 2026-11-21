@@ -308,6 +308,8 @@ class JobManager:
 
     def _cleanup_inputs(self, job: Job) -> None:
         """Keep the uploaded recording of the newest job of each map (for a rebuild or a bug report)."""
+        if getattr(self, "keep_inputs", False):  # the server was asked to keep everything the phones send
+            return
         with self._lock:
             older = [j for j in self._jobs.values() if j is not job and j.map_id == job.map_id and j.state in FINAL_STATES]
             known = {j.job_id for j in self._jobs.values()} | {j.get("job_id") for j in self._old}

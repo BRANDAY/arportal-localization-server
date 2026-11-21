@@ -183,6 +183,9 @@ function renderServer(s) {
   kv(dl, "Version", s.version + "  (API " + s.api_version + ", revision " + s.api_revision + ")");
   kv(dl, "Compute", s.device === "cuda" ? "GPU: " + s.device_name : "CPU only (" + s.device_name + ")");
   if (s.vram_mb) kv(dl, "GPU memory", s.vram_mb.allocated + " MB in use, peak " + s.vram_mb.peak + " MB");
+  if (s.localize) kv(dl, "Phones in line", (s.localize.running ? "1 being served, " : "none being served, ") + s.localize.waiting + " waiting"
+    + (s.localize.recent_wait_ms != null ? "; lately a request waited " + Math.round(s.localize.recent_wait_ms) + " ms (longest "
+      + Math.round(s.localize.recent_wait_ms_longest) + " ms)" : ""));
   kv(dl, "Processor", (s.cpu || "?") + " · " + s.cpu_count + " threads");
   kv(dl, "System", s.os);
   kv(dl, "Running for", dur(s.uptime_s));
