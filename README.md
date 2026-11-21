@@ -1,4 +1,4 @@
-﻿# locserver — self-hosted markerless visual localisation
+# locserver — self-hosted markerless visual localisation
 
 A small server that recognises a previously scanned room from a single camera
 image and tells an AR app where a virtual object (here: a doorway, the "portal")
@@ -58,7 +58,7 @@ git clone <repository url> ; cd localization-server
 
 # 2. environment (Python 3.13 and all packages; ~3 GB download, ~10 GB disk)
 uv sync
-uv run pytest                               # 192 tests, no GPU needed, about 5 minutes (4 of them need the phone captures and are skipped without them)
+uv run pytest                               # 220 tests, no GPU needed, about 5 minutes (4 of them need the phone captures and are skipped without them)
 
 # 3. a map: either your own room video ...
 uv run locserver-build-map data\input\room.mp4 --map-id room
@@ -201,7 +201,7 @@ COLMAP binary, ffmpeg, Docker or compiler is needed.
 ```powershell
 cd localization-server
 uv sync            # creates .venv and installs everything (~3 GB download)
-uv run pytest      # 192 tests, no GPU needed, about 5 minutes
+uv run pytest      # 220 tests, no GPU needed, about 5 minutes
 ```
 
 By default everything stays inside the project folder or in the normal
@@ -304,6 +304,8 @@ error, timings) and stored in `data\maps\<map-id>\`:
 ```
 map.json        metadata: metric flag, scale, camera, statistics, build options and timings
 anchors.json    named poses in map coordinates (edited through the API)
+room.json       the room plan (maps built from a recording; see "Room plan and automatic doorway")
+model.bin       the room as one coloured 3D surface, map coordinates (+ model.json with its numbers; server 0.8.0)
 features.npz    everything the server needs: keypoints, descriptors, 3D points, poses, VLAD index
 sfm\            the COLMAP model (open it with the COLMAP GUI if you like)
 points.ply      the sparse point cloud (MeshLab, CloudCompare)
@@ -312,6 +314,11 @@ images\         the mapping frames
 
 Rebuilding a map (`--overwrite`) creates a new coordinate frame; existing
 anchors are therefore moved aside to `anchors.stale.json` instead of being kept.
+
+Maps that are only tests (the test sequence, simulator runs) belong in
+`data\maps-trial\` (not read by the server, not in git): the app lists every
+map of `data\maps\` as a room. Moved there on 2026-11-21: `app_e2e`,
+`sim_room`, `tum_room`, `tum_room_sfm_only` - move one back to use it again.
 
 ---
 
@@ -331,7 +338,7 @@ Explorer). That is all:
    ```
    ============================================================================
 
-      SERVER IS RUNNING      ("MY-PC", version 0.7.2)
+      SERVER IS RUNNING      ("MY-PC", version 0.8.0)
 
       ADDRESS FOR THE PHONE:
           http://192.168.1.50:8077
@@ -364,9 +371,13 @@ running" and comes back by itself when the server is started again.
   at a failure afterwards" above.
 * Another port: `"Start AR Portal Server.cmd" -Port 9000` from a command
   prompt; without the panel window: `-NoPanel`.
-* **One server per data folder.** Do not start a second server on another port
-  with the same maps and work folders: at its start a server tidies up
-  unfinished builds, which would be the running builds of the first one.
+* **One server per data folder.** A second server on another port with the
+  same maps or work folder refuses to start (`COULD NOT START: another
+  localization server already works with the data folder ...`, exit code 4,
+  with the process id, port and start time of the first). At its start a
+  server tidies up unfinished builds, which would be the running builds of the
+  first one. A server that crashed does not block the next start. For a second
+  server give it its own folders (`LOCSERVER_MAPS_DIR`, `LOCSERVER_WORK`).
 
 The start file needs nothing changed on the PC: it calls PowerShell with
 `-ExecutionPolicy Bypass` for its own script only, loads `env.ps1` (and with it
@@ -442,12 +453,14 @@ start it.
 | **Devices** | every client that has contacted the server: name, address, last seen, the server's handling time, the round-trip time the app measured, the app's current step and tracking state, request and error counts. **online** while the last request is less than 10 s old, otherwise **lost** (with a Forget button). A client that does not send the device headers appears as "unnamed client" under its IP address. Click a row to filter the logs and the strip to that device |
 | **Maps** and **Jobs** | the loaded maps (images, 3D points, room plan, where the portal comes from); the running build with its progress bar, step and time left; finished builds with their result, warnings and errors |
 | **Room plan** | the selected map from above: walls with length, corners, door openings with their confidence, the portal anchor with an arrow into the room, the map's 3D points, the camera path of the scan, and where the phone was at the last successful localisation. `3D` tilts the view; drag to turn, wheel to zoom, hover for details. Without a room plan it shows the points and the camera path only |
+| **3D room and door** (server 0.8.0) | `3D` shows the room's coloured 3D model (when the map has one) with the walls, the doorways, a 1 m floor grid and the door as a box of its true size; left-drag turns, right- or shift-drag moves, the wheel zooms, the ceiling is cut away (toggle). **Edit door** (or a click on the door) lets the staff drag the door over the floor, turn it (also "turn to the nearest wall"), set width and height, and **Save** it - the same `PUT /maps/{id}/anchors/portal` the staff phone uses, so every phone gets the moved door with its next `/localize`. A room without a door gets **Place door**. Maps built before server 0.8.0 show the plan instead |
+| **Scan quality** (server 0.8.0) | the verdict on the selected room's scan - good / limited / rescan - with each reason, what to do differently and the numbers behind it (patch of floor, how far the phone looked down and up, repeated views, walls seen, frames in the map) |
 | **Localizations** | the last 30 `/localize` requests: time, device, map, result (good / weak / failed), inliers, time taken, alignment state, portal source, reason of a failure |
 | **Device log** | the events the app sends (`POST /devices/{id}/log`): app, connection, tracking, scan, upload, job, localisation, portal, errors. Filter by device and level; hover a line for its data. Every event is also appended to `work\device-logs\<device_id>.jsonl` |
 | **Server requests** | every request with device, status and time; the periodic polls are hidden by default |
 
 Everything refreshes once a second. The panel is read-only except for
-"Forget"; it keeps the last 2,000 events per device and the last 200
+"Forget" and the door editor; it keeps the last 2,000 events per device and the last 200
 localisations in memory - after a restart of the server it starts empty (the
 log files stay). The light or dark theme follows the system and can be
 switched with the button at the top right. The address can carry start-up
@@ -628,7 +641,7 @@ automatically", which asks every address of the phone's own /24 network for
 
    ```
    [info] LAN address: http://192.168.1.50:8077   (Wi-Fi)
-   [ OK ] Server "MY-PC" is running on port 8077 (version 0.7.2, API v1, maps: room).
+   [ OK ] Server "MY-PC" is running on port 8077 (version 0.8.0, API v1, maps: room).
    [info] Network "CampusNet" on Wi-Fi: profile Public
    [FIX ] No firewall rule lets inbound TCP 8077 through on Public networks, ...
               New-NetFirewallRule -DisplayName "AR Portal localization server (TCP 8077)" ...
@@ -678,19 +691,26 @@ uv run python scripts\get_models.py
 
 **How it works** (`src/locserver/roomplan.py`, `roomstage.py`):
 
-1. *Dense depth.* Up to 40 key frames of the map go through Depth Anything V2
-   Small, which gives depth only up to an unknown scale and shift per image.
-   Both are fitted to the map's own 3D points visible in that image, so the
-   depth becomes metric and consistent with the map. Images whose depth does
-   not reproduce those points well (fewer than 70 % within 8 %, or a median
-   error above 4 %) are left out.
+1. *Dense depth.* Every map image that shows something new (an image within
+   4 cm and 3 degrees of an earlier one is skipped) goes through Depth Anything
+   V2 Small, which gives depth only up to an unknown scale and shift per image.
+   Both are fitted to the map's own 3D points visible in that image, then a
+   smooth correction across the image bends the depth onto the same points, so
+   the depth becomes metric and consistent with the map (first real room:
+   median error at the map points 3.2 % before, 1.8 % after the correction).
+   Images whose depth does not reproduce those points well (fewer than 70 %
+   within 8 %, or a median error above 4 %) are left out of the plan. The same
+   depth makes the 3D model (below). Before server 0.8.0: 40 key frames spread
+   in time, without the correction.
 2. *Floor, ceiling, walls.* The recording's ARCore poses make the map metric
    and gravity-aligned, so the floor is simply the lowest strong horizontal
    level and walls are vertical planes. Walls are found by RANSAC on the points
    with a horizontal normal; a plane only seen *through* another wall (the
    corridor behind an open door) and a plane with a parallel one close behind
-   it (a cupboard) are discarded. Corners are intersections of neighbouring
-   walls.
+   it (a cupboard) are discarded. Walls within 12 degrees of the room's two
+   main directions (found from the normals of all wall points) are turned onto
+   them when most of the wall surface agrees - a slanted wall stays slanted.
+   Corners are intersections of neighbouring walls.
 3. *Open doorways - geometry.* Every depth ray that crosses a wall plane says
    either "the surface is here" or "I measured something well behind it". A
    floor-standing, door-sized block of the second kind is an opening; a window
@@ -704,6 +724,29 @@ uv run python scripts\get_models.py
    automatically from confidence 0.5.
 
 A room mesh from the phone (OBJ/PLY, optional upload) adds points to step 2.
+
+**The room in 3D** (server 0.8.0, `src/locserver/roommodel.py`): after the plan
+the same depth images are fused into a 3 cm voxel grid (TSDF, on the GPU) and
+turned into one coloured surface, `model.bin` next to the map, in the map's
+frame (the frame of the plan and the door). `GET /maps/{id}/model` serves it
+(`?format=ply` for MeshLab / Blender), `GET /maps/{id}/model/info` its numbers.
+The panel draws it in its 3D view together with the walls and the door, and
+there the door can be selected, moved on the floor, turned and resized and
+saved (the same `PUT /maps/{id}/anchors/portal` the staff phone uses). Without
+a browser: `uv run python scripts\render_room_model.py data\maps\<room> --out
+model.png` (view from above + four views). It shows only what the phone saw:
+holes behind furniture and where it never looked.
+
+**The verdict on the scan** (`src/locserver/scanquality.py`): every build judges
+the recording from the phone's own poses - how large the patch of floor was,
+how far the phone looked down and up, how much of the recording only repeats
+earlier views, how much of the walls was seen, how many frames made it into
+the map - and says `good`, `limited` or `rescan` with each reason and what to
+do differently (`scan_quality` in `GET /maps/{id}`, shown in the panel; the
+fields are in [`docs/api-v2.md`](docs/api-v2.md#14-the-room-in-3d-and-the-verdict-on-the-scan)).
+The first real scan (100 s turning on a patch of 1.1 x 0.8 m, never tilted
+above -11 degrees, 45 % repeats) is a `rescan`: it works from where it was
+made, but no processing can add the views it never had.
 
 The build runs in a separate process (`locserver.jobworker`), one at a time;
 `/health`, the job polling and `/localize` stay responsive. The localisation
@@ -732,7 +775,7 @@ the same code fed with the Kinect's measured depth instead of the depth network.
 | Floor level (true value 0 in this dataset) | 7 cm (network depth), 5 cm (Kinect depth) |
 | Door detector on the 40 key frames | at score 0.30 it also fires on monitors, windows with blinds and posters (0.33-0.40); wooden-framed glass panels reach 0.48-0.53; the one real open doorway in view scores 0.58 - hence the 0.42 threshold and the three-frames rule |
 | Time for the room plan (GTX 1050 Ti, 40 key frames) | 65-190 s |
-| End to end through the running server: a recording in the phone's file shape cut from the same sequence (10 s, 188 frames, 32 used), sent by `scripts\simulate_phone.py` | upload, 7 stages with percentages, map + plan after 225-246 s; numbers in [Without a phone](#without-a-phone-the-simulator) |
+| End to end through the running server: a recording in the phone's file shape cut from the same sequence (10 s, 188 frames, 32 used), sent by `scripts\simulate_phone.py` | upload, 7 stages (8 from server 0.8.0) with percentages, map + plan after 225-246 s; numbers in [Without a phone](#without-a-phone-the-simulator) |
 | Repeatability: that recording built three times (SfM is not deterministic) | the map is the same every time (31 of 32 cameras within 10 cm of the recording; floor level -0.07 / -0.04 / -0.05 m). The plan is not: 2 walls + 1 corner + a door candidate (0.51) once, no wall twice - the two walls are seen over 0.8-1.1 m of height, at the 1.2 m limit. On a short desk-level clip the plan is a coin toss; the job result and the panel now say why |
 | (correction, 2026-11-21) | two rows that stood here before were measured with a test recording whose vertical axis was wrong (z-up poses declared as y-up - an error in the test data, not in the server) and were removed |
 | Server responsiveness during a build | 514 polls of `/health` + `/jobs/{id}` during one build: worst 139 ms and 22 ms. In the very first build a single poll took 17 s; it was not reproduced and its cause was not found |
@@ -777,11 +820,11 @@ what the app's automatic search and its "connected" indicator call.
 {"status": "ok",
  "service": "arportal-localization-server",
  "api_version": 1,
- "api_revision": 6,
- "capabilities": ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones"],
- "server_version": "0.7.2",
+ "api_revision": 7,
+ "capabilities": ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones", "room_model", "scan_quality"],
+ "server_version": "0.8.0",
  "server_name": "MY-PC",
- "version": "0.7.2", "device": "cuda", "device_name": "NVIDIA GeForce GTX 1050 Ti",
+ "version": "0.8.0", "device": "cuda", "device_name": "NVIDIA GeForce GTX 1050 Ti",
  "vram_mb": {"allocated": 56, "peak": 527},
  "models": {"extractor": "aliked-n16", "matcher": "lightglue-aliked", "max_keypoints": 2048},
  "maps": ["tum_room"], "maps_dir": "C:\\...\\data\\maps", "sessions": 0, "uptime_s": 12.3,
@@ -833,7 +876,7 @@ every later session restores it automatically.
 | Field | Type | Meaning |
 |---|---|---|
 | `image` | file | JPEG/PNG camera image. Exactly one of `image` / `video`. |
-| `video` | file | short clip; the sharpest frame of each of `max_frames` (default 3) equal parts is localised |
+| `video` | file | short clip; the sharpest frame of each of `max_frames` (default 3) equal parts is localised, up to the first `good` one (`all_frames=1`: all of them) |
 | `session_jsonl` | file | ViroReact `session.jsonl` belonging to `video`: gives per-frame AR poses and intrinsics |
 | `map_id` | text | may be omitted if exactly one map is loaded |
 | `fx, fy, cx, cy` | numbers | optional intrinsics of the uploaded image in pixels; `width, height` if they refer to another resolution |
@@ -892,7 +935,7 @@ down-scaling to the map's `image_max_size`); the pose does not depend on it.
 | `quality` | Rule | Meaning for the client |
 |---|---|---|
 | `good` | inliers ≥ 60 (≥ 100 if the focal length was estimated) **and** inlier ratio ≥ 0.25 | use the pose |
-| `weak` | inliers ≥ 25 (≥ 40 if the focal length was estimated) | plausible, do not rely on it alone; send more frames |
+| `weak` | inliers ≥ 25 (≥ 40 if the focal length was estimated) | plausible, not more: the server does not use it for the alignment (weak frames put the door 1.6-2.4 m off in the first run on a phone); send more frames |
 | `failed` | anything else (`success: false`, `pose: null`, `reason` says why) | not this room / view not mapped / too dark or blurred |
 
 Inliers are 2D–3D correspondences within 8 px of the PnP solution at the
@@ -938,9 +981,14 @@ an AR camera pose accompanies the image, the response contains:
   "anchors": {
     "portal": {"position": [-2.5, 0.0, -1.0], "rotation_euler_deg": [0, 90, 0], "quaternion_xyzw": [0, 0.7071, 0, 0.7071]}
   },
-  "ar_pose_pairing": "request", "from_weak_localization_only": false, "scale_persisted": false
+  "ar_pose_pairing": "request", "scale_persisted": false
 }
 ```
+
+Only frames of quality `good` are observations of the alignment. With weak
+frames only and no earlier good frame of the session the answer is `"status":
+"failed", "reason_code": "weak_only", "T_arworld_from_map": null` and has no
+door (docs/api-v2.md, section 6).
 
 `anchors.<name>.position` (metres) and `rotation_euler_deg` can be passed
 straight to `<ViroNode position={...} rotation={...}>`; the node's content must
@@ -986,8 +1034,10 @@ Two ways to supply several observations:
 ]}
 ```
 
-A clip uploaded together with its `session.jsonl` already contains one AR pose
-per frame, so a single request yields several observations.
+A clip uploaded together with its `session.jsonl` contains one AR pose per
+frame. For a map without scale every picked frame is localised, so a single
+request yields several observations. For other maps the clip is answered at
+its first good frame (one observation) unless `all_frames=1` is sent.
 
 ---
 

@@ -51,15 +51,21 @@ class StubPipe:
 
 
 class StubLocalizer:
-    """Returns the poses queued by the test instead of running any model."""
+    """Returns the poses queued by the test instead of running any model.
+
+    A queued pose gives a good result, ``None`` (or an empty queue) a failed one; a queued
+    ``LocalizationResult`` is returned as it is (see ``weak_result``).
+    """
 
     def __init__(self):
-        self.queue: list[np.ndarray | None] = []
+        self.queue: list[np.ndarray | LocalizationResult | None] = []
         self.calls: list[dict] = []
 
     def localize(self, lmap, image_bgr, intrinsics=None, device_id=None, assume_map_camera=False):
         self.calls.append({"shape": image_bgr.shape, "intrinsics": intrinsics, "device_id": device_id})
         T = self.queue.pop(0) if self.queue else None
+        if isinstance(T, LocalizationResult):
+            return T
         h, w = image_bgr.shape[:2]
         if T is None:
             return LocalizationResult(False, "failed", "stub: no pose", working_size=(w, h), timings_ms={"total": 1.0})
@@ -70,6 +76,16 @@ class StubLocalizer:
             intrinsics_source="request" if intrinsics else "estimated", working_size=(w, h),
             num_keypoints=1000, timings_ms={"total": 1.0},
         )
+
+
+def weak_result(T, inliers=40) -> LocalizationResult:
+    """A localisation that succeeded with few inliers - what the stub hands out when this is queued."""
+    return LocalizationResult(
+        True, "weak", None, T, num_matches=300, num_inliers=inliers, inlier_ratio=0.13,
+        reproj_error_px_mean=3.0, reproj_error_px_median=2.5,
+        intrinsics=dict(fx=500.0, fy=500.0, cx=32.0, cy=24.0, width=64, height=48),
+        intrinsics_source="estimated", working_size=(64, 48), num_keypoints=1000, timings_ms={"total": 1.0},
+    )
 
 
 @pytest.fixture

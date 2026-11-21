@@ -30,9 +30,9 @@ from .mapstore import utc_now
 log = logging.getLogger(__name__)
 
 STAGES = {
-    "build_map": [("frames", 0.05), ("features", 0.05), ("matching", 0.35), ("sfm", 0.35), ("depth", 0.08),
-                  ("room_plan", 0.10), ("finalize", 0.02)],
-    "room_plan": [("depth", 0.40), ("room_plan", 0.50), ("finalize", 0.10)],
+    "build_map": [("frames", 0.05), ("features", 0.05), ("matching", 0.33), ("sfm", 0.33), ("depth", 0.10),
+                  ("room_plan", 0.08), ("model", 0.04), ("finalize", 0.02)],
+    "room_plan": [("depth", 0.50), ("room_plan", 0.30), ("model", 0.15), ("finalize", 0.05)],
 }
 FINAL_STATES = ("succeeded", "failed", "cancelled")
 BUILD_PREFIX = ".build-"
@@ -45,11 +45,14 @@ def build_costs(frames: int, pairs: int) -> dict[str, float]:
     while the build runs. Measured 2026-11-21 on builds of 32 frames (a scan
     of 10 s: 496 pairs, reconstruction 20 s) and of 186 frames (85 s: 2415
     pairs, reconstruction 504 s - it grows faster than the number of frames).
-    ``frames`` (reading the recording) is set from its real duration.
+    ``frames`` (reading the recording) is set from its real duration. Depth is
+    computed for every image that shows something new (first real room: 165
+    frames selected, 97 of them new - depth 78 s, room plan with the door
+    detector on all 97 202 s, fusing the room model 6 s).
     """
     frames, pairs = max(1, frames), max(1, pairs)
     return {"frames": 0.0, "features": 8 + 0.5 * frames, "matching": 0.19 * pairs, "sfm": 0.3 * frames + 0.013 * frames**2,
-            "depth": 25.0, "room_plan": 35.0, "finalize": 5.0}
+            "depth": 20 + 0.5 * frames, "room_plan": 20 + 1.2 * frames, "model": 15.0, "finalize": 5.0}
 
 
 class JobError(Exception):

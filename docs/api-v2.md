@@ -11,7 +11,7 @@ v2 only **adds** endpoints and response fields.
 Contents: [compatibility](#1-compatibility) · [recording upload](#2-upload-a-room-recording) ·
 [jobs](#3-jobs-progress-of-a-build) · [room plan](#4-room-plan) · [portal](#5-portal-automatic-doorway) ·
 [/localize additions](#6-localize-additions) · [client flows](#7-client-flows) · [status](#8-implementation-status) ·
-[devices and device log](#9-devices-and-device-log)
+[devices and device log](#9-devices-and-device-log) · [3D model and scan quality](#14-the-room-in-3d-and-the-verdict-on-the-scan)
 
 ---
 
@@ -26,8 +26,8 @@ Contents: [compatibility](#1-compatibility) · [recording upload](#2-upload-a-ro
 ```json
 {
   "status": "ok", "service": "arportal-localization-server", "api_version": 1,
-  "api_revision": 6,
-  "capabilities": ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones"],
+  "api_revision": 7,
+  "capabilities": ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones", "room_model", "scan_quality"],
   "jobs": {"running": 1, "queued": 0},
   "...": "all v1 fields unchanged"
 }
@@ -43,6 +43,8 @@ Contents: [compatibility](#1-compatibility) · [recording upload](#2-upload-a-ro
   finds the room itself when `map_id` is left out, and Wi-Fi networks can be
   sent as a hint for which room (section 12). `several_phones` (revision
   6): a fair line for `/localize`, `load` in its answer (section 13).
+  `room_model` and `scan_quality` (revision 7): the room as a coloured 3D
+  surface, and the verdict on the scan (section 14).
 * Errors are unchanged: HTTP status + `{"detail": "text"}`.
 * Units and frames are unchanged: metres, right-handed, `T_a_from_b`,
   quaternions `[x, y, z, w]`, `rotation_euler_deg` = ViroReact Euler degrees
@@ -184,7 +186,7 @@ POST /jobs/{job_id}/cancel     -> Job                        (no effect on a fin
   "state": "running",
   "stage": "matching",
   "stage_index": 3,
-  "stage_count": 7,
+  "stage_count": 8,
   "stage_progress": 0.41,
   "progress": 0.24,
   "message": "matched 410 of 1000 image pairs",
@@ -204,7 +206,7 @@ POST /jobs/{job_id}/cancel     -> Job                        (no effect on a fin
 | `kind` | `build_map` (recording upload) or `room_plan` (plan recomputed for an existing map) |
 | `state` | `queued` → `running` → `succeeded` \| `failed` \| `cancelled`. The last three are final |
 | `stage` | current stage, see table; `null` while queued |
-| `stage_index` / `stage_count` | 1-based position of the stage, for "step 3 of 7" |
+| `stage_index` / `stage_count` | 1-based position of the stage, for "step 3 of 8" |
 | `stage_progress` | 0..1 inside the stage |
 | `progress` | 0..1 overall, never decreases, `1.0` only when `state == "succeeded"` — show this as the percentage |
 | `message` | one short English line for a debug overlay |
@@ -222,11 +224,16 @@ sequence the whole build took 13 min on a GTX 1050 Ti):
 | 2 | `features` | 5 % | local features of every frame |
 | 3 | `matching` | 35 % | feature matching between frame pairs |
 | 4 | `sfm` | 35 % | structure from motion + metric alignment to the ARCore poses |
-| 5 | `depth` | 8 % | dense depth of key frames for the room geometry |
-| 6 | `room_plan` | 10 % | floor, walls, corners, door openings |
-| 7 | `finalize` | 2 % | write the map, load it into the server |
+| 5 | `depth` | 10 % | dense depth of every frame that shows something new, bent onto the map points |
+| 6 | `room_plan` | 8 % | floor, walls, corners, door openings |
+| 7 | `model` | 4 % | the room as one coloured surface (section 14) |
+| 8 | `finalize` | 2 % | write the map, load it into the server |
 
-`room_plan` jobs have only stages `depth`, `room_plan`, `finalize`.
+The shares are the starting point; from server 0.7.1 the server sets them from
+the amount of work once the frames are chosen. `room_plan` jobs have only
+stages `depth`, `room_plan`, `model`, `finalize`. Since server 0.8.0 the stage
+`model` exists (revision 7): a client that shows "step 3 of 7" must take
+`stage_count` from the job, not from this table.
 
 `error.code`:
 
@@ -249,9 +256,17 @@ sequence the whole build took 13 min on a GTX 1050 Ti):
   "build_time_s": 791.2,
   "room": {"status": "ok", "num_walls": 4, "num_corners": 4, "num_openings": 1, "best_opening_id": "o0"},
   "portal": {"source": "auto", "opening_id": "o0", "confidence": 0.78},
+  "model": {"available": true, "vertices": 53169, "triangles": 99720, "area_m2": 35.1, "voxel_m": 0.03,
+            "bbox_min": [-3.49, -1.69, -2.09], "bbox_max": [3.21, 1.13, 2.88], "images_used": 97, "bytes": 2153724,
+            "created_utc": "2026-11-21T16:05:43Z"},
+  "scan_quality": {"verdict": "rescan", "summary": "Scan the room again: ...", "issues": ["..."], "...": "section 14"},
   "warnings": []
 }
 ```
+
+`model` and `scan_quality` from server 0.8.0 (revision 7); `model.available`
+is `false` when the model could not be made (a line in `warnings` says why) -
+the map is valid without it.
 
 A map whose room plan could not be computed is still a valid localisation map
 (`state: "succeeded"`, `room.status: "unavailable"`, a line in `warnings`).
@@ -540,10 +555,48 @@ New optional form field:
 | `wifi` | JSON text | the Wi-Fi networks the phone sees; only orders the candidate rooms - section 12 |
 | `max_rooms` | int (default 3, at most 6) | without `map_id`: how many rooms are tried |
 | `only_with_door` | bool (default `false`) | without `map_id`: only rooms whose door a staff member placed (what a visitor wants) |
+| `all_frames` | bool (default `false`) | a clip: localise every picked frame, also after a good one. For measurements; the app does not send it |
 
 The answer always carries `"room_choice"` (section 12), `"frame_id"` and
 `"load"` (section 13: how long the request stood in line, and when to send the
 next one).
+
+**A clip is answered at its first good frame** (server 0.8.0). The picked
+frames of a clip are localised in their order; as soon as one is `good`, the
+rest is left out. In a clip that is recognised nearly every frame is, so the
+others only cost time. `frames[]` lists the frames that were localised,
+`load.frames_used` counts them and `load.stopped_early` says whether frames
+were left out. A clip without a good frame is localised in full, as before.
+One exception: for a map without scale a clip that brings its `session.jsonl`
+is always localised in full, because that scale comes from frames taken apart.
+
+**Only good frames place the door** (server 0.8.0). In the first run on a
+phone the `good` frames put the door within 0-11 cm of each other, the `weak`
+ones 1.6-2.4 m off. A `weak` frame is still reported as before (`success:
+true`, `quality: "weak"`, its pose, its entry in `frames[]`), but it is no
+observation of the alignment: it is not added to the session and never places
+or moves a door. What the app sees after a request without a good frame:
+
+* the session has good frames from earlier requests: `alignment` is the one
+  from those frames, unchanged (`session.num_observations` did not grow);
+* no good frame yet, or no `session_id`: no alignment and no door -
+
+```json
+"alignment": {"status": "failed", "reason_code": "weak_only",
+              "reason": "only weak localisations so far: a door placed from them can stand metres off, ...",
+              "T_arworld_from_map": null, "observations_total": 0, "thresholds": {"...": "..."}}
+```
+
+  There is no `portal` and no `anchors`. Keep the door hidden, tell the user
+  to point the phone at furniture or walls at eye height, and send the next
+  clip. `reason_code` is present only in this case; a clip in which nothing
+  was recognised fails as before (`reason` without `reason_code`).
+
+`alignment.from_weak_localization_only` is gone: it could only be `false`
+now. A session without a good frame has no alignment, so
+`PUT /maps/{map_id}/anchors/{name}` and `POST /maps/{map_id}/vps/bridge` with
+its `session_id` answer `422`, as for a session that never localised.
+`POST /align` uses what the client sends: send it only poses of `good` frames.
 
 With a `session_id` and a usable alignment the answer also carries
 `"door_stability"` (otherwise `null`) - numbers for a report, nothing the app
@@ -562,7 +615,9 @@ session (what a person sees as the door jumping); `shift_from_median_m` and
 `spread_m` / `spread_max_m` (root mean square / largest) are distances from
 the middle position of all the session's attempts. `point` is `door`, or
 `map_origin` while the room has no door. A new door, a re-scan of the room or
-a new AR session starts a new series (`attempt` 1, the shifts `null`).
+a new AR session starts a new series (`attempt` 1, the shifts `null`). A
+request without a good frame leaves the door where it stood: it counts as an
+attempt with a shift of 0 (or gives `null` while the session has no alignment).
 
 When the alignment is complete (`alignment.status == "ok"`), `alignment` gains:
 
@@ -1247,14 +1302,21 @@ does so that five phones are served well:
   localised with fewer frames: two while the session still looks for the room,
   one once it is aligned (three or more observations) and only refines. With
   nobody waiting it is what the request asked for (`max_frames`, default 3).
+  Since server 0.8.0 a clip is also answered at its first good frame, line or
+  no line (section 6).
 * **The answer says what happened**, and gives advice for the rhythm:
 
 ```json
-"load": {"ahead": 2, "waited_ms": 1840.5, "frames_asked": 3, "frames_used": 2, "next_request_after_s": 2.0}
+"load": {"ahead": 2, "waited_ms": 1840.5, "frames_asked": 3, "frames_used": 2, "stopped_early": false,
+         "next_request_after_s": 2.0}
 ```
 
   `ahead`: requests that were before this one (in line or being served);
-  `waited_ms`: time in line; `next_request_after_s`: **when to send the next
+  `waited_ms`: time in line; `frames_asked`: frames the request asked for (at
+  most what the clip has); `frames_used`: frames that were really localised;
+  `stopped_early`: `true` when a good frame ended the clip before all picked
+  frames were localised (fewer frames because of the line is not "stopped
+  early"; a single picture always says `false`); `next_request_after_s`: **when to send the next
   clip** - 1 s while the session is not settled, 5 s once it is (alignment
   `ok` from six or more frames: more clips only refine), doubled when the line
   is long. It is advice: an app that follows it keeps the line short for the
@@ -1302,6 +1364,129 @@ with status, duration and the reason of a refusal; `localizations.csv` has one
 row per answered `/localize` (result, quality, matches, inliers, times,
 alignment, `door_shift_m`, `door_spread_m`, the folder). `GET /health` says
 `"keeps_incoming": true`. Off by default. Nothing changes for the app.
+
+## 14. The room in 3D and the verdict on the scan
+
+Capabilities `room_model` and `scan_quality` (revision 7, server 0.8.0).
+
+### The 3D model
+
+```
+GET /maps/{map_id}/model               -> model.bin (application/octet-stream)   404 when the room has none
+GET /maps/{map_id}/model?format=ply    -> the same as binary PLY (vertices with colours and normals, faces)
+GET /maps/{map_id}/model/info          -> {"map_id", "frame_id", "scale_m_per_unit", "model": {numbers below}}
+```
+
+Every map build (and every `POST /maps/{id}/room/rebuild`) makes the room as
+one coloured surface: the depth network's picture of every map image that
+shows something new, made metric with the map's own 3D points (`1/z = a·d + b`
+per image, then a smooth correction across the image fitted to the same
+points), fused into a 3 cm voxel grid (TSDF) and turned into triangles. It is
+in **the frame of the map** - the frame of `room.json` and of the door - in
+map units (`scale_m_per_unit`: metres per unit; `1.0` for every map built from
+a phone recording). So the door, the plan and the model can be drawn together
+without any conversion; an AR client that has the alignment
+(`T_arworld_from_map`) can place the model in its world the same way as the
+door.
+
+`model.bin` (little-endian, every block padded with zeros to a multiple of 4 bytes):
+
+| Bytes | Content |
+|---|---|
+| 4 | `LRM1` |
+| 4 + 4 + 4 + 24 | number of vertices N (uint32), number of triangles M (uint32), voxel size (float32), bbox min xyz and max xyz (float32) |
+| 12 N | positions, float32 x, y, z |
+| 3 N (+pad) | colours, uint8 R, G, B |
+| 3 N (+pad) | normals, int8 × 127, pointing into the room (towards where the camera was) |
+| 12 M | triangles, uint32 vertex indices, counter-clockwise seen from inside the room |
+
+`model.json` / `model/info`: `vertices`, `triangles`, `area_m2` (surface),
+`voxel_m`, `grid`, `bbox_min`, `bbox_max`, `images_used`, `images_tried`,
+`images_rejected`, `depth_median_rel_error` (how far the depth network was
+from the map points before the correction) and
+`depth_median_rel_error_corrected` (after it), `floating_triangles_removed`,
+`fused_on` (`cuda` or `cpu`), `build_time_s`, `bytes`, `created_utc`.
+
+First real room (2026-11-21, 153 map images, 97 of them new): depth error
+3.2 % before, 1.8 % after the correction; 53,169 vertices, 99,720 triangles,
+35 m² of surface, 2.2 MB; 2 min of depth + 6 s of fusion on a GTX 1050 Ti.
+
+**What it cannot show**: only what the phone saw. Behind furniture, above the
+highest look and in directions never looked at there are holes; a scan made
+from one spot shows the room as seen from that spot. The verdict below says
+when that is the case.
+
+Rows of `GET /maps` and of `/monitor/state` carry `"model": {"available": true,
+"vertices", "triangles", "area_m2", "bytes", "created_utc"}` (or
+`{"available": false}`). A re-scan replaces the model with the room.
+
+The room plan (section 4) is made from the same depth since server 0.8.0
+(`sources` contains `mono_depth_corrected`; before: 40 frames spread in time),
+and walls that are within 12 degrees of the room's two main directions are
+turned onto them when most of the wall surface agrees (`stats.squared`):
+on the first real room the walls stood 1-11 degrees off and the corners at
+83-97 degrees, while the fused surface put 71 % of the vertical area within 10
+degrees of two square directions.
+
+### The verdict on the scan
+
+`GET /maps/{id}` has `scan_quality`; rows of `GET /maps` and `/monitor/state`
+have it in short as `"scan": {"verdict", "summary", "issues": [codes]}` (`null`
+for maps built before server 0.8.0 that were not rebuilt). The job `result`
+of a build carries the whole object.
+
+```json
+{
+  "version": 1,
+  "verdict": "rescan",
+  "summary": "Scan the room again: The scan was made from one spot: ...",
+  "issues": [
+    {"code": "one_spot", "value": 1.1, "limit": 1.5,
+     "text": "The scan was made from one spot: the phone stayed within 1.1 x 0.8 m. The room is known only as seen from there.",
+     "do": "Walk through the room while recording: along the walls, and through the places where visitors will stand."}
+  ],
+  "poses_from": "recording",
+  "motion": {"duration_s": 100.4, "poses": 824, "footprint_m": [1.1, 0.84], "footprint_area_m2": 0.71,
+             "floor_cells_visited": 9, "path_m": 9.0, "turned_deg": 1109, "directions_seen_share": 1.0,
+             "pitch_deg": {"lowest": -68.4, "median": -14.8, "highest": -11.5},
+             "distinct_views": 53, "repeated_share": 0.45, "standing_still_share": 0.17},
+  "walls": {"walls": 5, "corners": 3, "walls_seen_share": 0.48, "least_seen_wall_share": 0.21},
+  "frames": {"selected": 165, "in_map": 153, "share": 0.93},
+  "limits": {"footprint_min_m": 1.5, "look_down_deg": -30.0, "look_up_deg": 15.0, "repeated_share_max": 0.35,
+             "walls_seen_min": 0.45, "registered_min": 0.7, "directions_min": 0.75}
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `verdict` | `good`; `limited` = works, but only where and how it was scanned (one or two issues); `rescan` = three issues or more, or less than half of the frames made it into the map |
+| `summary` | one English sentence for the staff, the issues' `text` joined |
+| `issues[].code` | `one_spot`, `never_looked_down`, `never_looked_up`, `repeated_views`, `not_all_around`, `walls_poorly_seen`, `frames_lost` |
+| `issues[].value` / `limit` | what was measured and the limit it missed (units of the matching `limits` key) |
+| `issues[].text` / `do` | what is wrong and what to do differently, English, for the staff screen |
+| `poses_from` | `recording` (the phone's poses of the whole recording) or `map_images` (only the cameras of the map: a room rebuilt without its recording) |
+| `motion.footprint_m` | the patch of floor the phone moved over, long and short side (2nd to 98th percentile), metres |
+| `motion.pitch_deg` | how far the phone looked down (`lowest`) and up (`highest`), degrees above the horizon |
+| `motion.repeated_share` | share of the recording that shows a view it already had (same 0.5 m floor cell, 20° of heading, 20° of tilt, after the first 1.5 s); `standing_still_share`: moved < 3 cm and turned < 3° within a second |
+| `motion.directions_seen_share` | share of the 18 compass sectors of 20° that were looked at |
+| `walls.walls_seen_share` | share of the plan's wall area that was seen (furniture in front counts as not seen) |
+| `frames` | frames chosen from the recording, and how many of them are in the map |
+
+The thresholds are choices set from the first real scan (100 s from a patch
+of 1 x 1 m, three turns on the spot, the last 35 s standing still - the map
+recognised the room from there, but a visitor looking down at a table 2 m away
+was not recognised) and are sent along in `limits`. The app shows `summary`,
+or `verdict` with the list of `text` + `do`; it decides nothing from it - the
+room works as long as the build succeeded.
+
+**What processing cannot cure** (and so only a new scan can): views the phone
+never had - other places in the room, the phone tilted down the way visitors
+hold it, walls above the highest look, walls behind furniture. When a
+recording has more frames than the map takes (200), frames that repeat a pose
+(standing still, coming back) are left out first, so that they do not crowd
+out new views (`frame_selection.dropped_same_pose` in `map.json`); the server
+squares walls and bends the depth onto the map points - but it cannot invent
+a view.
 
 ---
 
@@ -1380,3 +1565,25 @@ alignment, `door_shift_m`, `door_spread_m`, the folder). `GET /health` says
   up and down so that the walls are seen from the floor to the ceiling"); the
   same text is among the job's `warnings` as "room plan is partial: ...".
   No field changed; show `reason` as it is.
+* 2026-11-21 — **server 0.8.0: lessons of the first run
+  on a phone.** `/localize` answers a clip at its first good frame (`frames[]`
+  and `load.frames_used` say what was localised, new `load.stopped_early`,
+  new form field `all_frames` switches it off). **Changed behaviour:** only
+  `good` frames become observations of the alignment; a request with weak
+  frames only leaves an earlier alignment as it is, and without one answers
+  `alignment.status: "failed"` with the new `reason_code: "weak_only"`,
+  `T_arworld_from_map: null` and no `portal` (section 6).
+  `alignment.from_weak_localization_only` is removed. Server: a second server
+  on the same maps or work folder refuses to start (exit code 4).
+* 2026-11-21 — **revision 7, server 0.8.0: the room in 3D and the verdict on
+  the scan** (owner: "чтобы оно построилось в полноценную комнату и в 3D ее
+  подняло, чтобы можно было смотреть, где дверь"). New section 14:
+  `GET /maps/{id}/model` (`model.bin`, or `?format=ply`), `GET
+  /maps/{id}/model/info`, `scan_quality` in `GET /maps/{id}` and in the job
+  result, `model` and `scan` in the rows of `GET /maps`. A build has 8 stages
+  (new `model`, before `finalize`); a `room_plan` job has 4. The room plan is
+  made from the corrected depth of every new map image and its walls are
+  squared to the room. Over the limit of 200 frames, frames that repeat a
+  pose are left out first when the map is built. The panel shows the model and lets the staff move the door (it saves
+  with the same `PUT /maps/{id}/anchors/portal`). Capabilities `room_model`,
+  `scan_quality`. Nothing was removed; `stage_count` changed from 7 to 8.

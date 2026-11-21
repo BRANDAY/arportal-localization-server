@@ -35,6 +35,9 @@ ROOM_FILE = "room.json"
 # test sequence against Kinect depth: views inside these limits were 1-6 % off, the others up to 34 %.
 STRICT_INLIER_FRACTION = 0.70
 STRICT_MEDIAN_REL_ERROR = 0.040
+# The door detector looks at no more than this many images, spread over all of them. Each image costs it 2-12 s
+# (12 s when the server's own models share the 4 GB card); a doorway needs a few views, not a hundred.
+MAX_DOOR_VIEWS = 48
 Progress = Callable[[str, float, str], None]
 
 
@@ -285,12 +288,16 @@ def compute_room_for_map(
     box_provider: Callable | None = None,
     views_out: str | Path | None = None,
     refine_with_map_points: bool = True,
+    views_in: list[tuple[DepthView, object]] | None = None,
 ) -> tuple[dict, list[str]]:
     """Room plan of a map (frame ``map``) and a list of warnings. Does not write anything.
 
     ``depth_provider(image) -> metric z-depth image or None`` and
     ``box_provider(image, bgr) -> [(x0, y0, x1, y1, score)]`` replace the two
-    networks (evaluation with measured depth, tests).
+    networks (evaluation with measured depth, tests). ``views_in`` - pairs of
+    (depth view, map image) - is depth that exists already (the room model
+    computes it for every image, see :mod:`locserver.roommodel`): the depth
+    step is skipped and ``max_views`` does not apply.
     """
     progress = progress or (lambda stage, frac, msg: None)
     warnings: list[str] = []
@@ -311,7 +318,11 @@ def compute_room_for_map(
     strict: list[bool] = []
     net = None
     try:
-        if depth_provider is None:
+        if views_in is not None:
+            views = [v for v, _ in views_in]
+            used_images = [(im, None) for _, im in views_in]   # the picture is read when the door detector needs it
+            keys = []
+        elif depth_provider is None:
             from .roomnets import DepthNet
 
             net = DepthNet(device)
@@ -332,7 +343,8 @@ def compute_room_for_map(
             if v is not None:
                 views.append(v)
                 used_images.append((im, bgr))
-        sources.append("measured_depth" if depth_provider is not None else "mono_depth")
+        sources.append("mono_depth_corrected" if views_in is not None else
+                       "measured_depth" if depth_provider is not None else "mono_depth")
         if strict and sum(strict) >= max(8, 0.4 * len(strict)):
             rejected += len(strict) - sum(strict)
             views = [v for v, ok in zip(views, strict) if ok]
@@ -357,8 +369,18 @@ def compute_room_for_map(
                 from .roomnets import DoorNet
 
                 det = DoorNet(device)
+            look = set(np.unique(np.linspace(0, len(views) - 1, min(len(views), MAX_DOOR_VIEWS)).round().astype(int)).tolist())
+            done = 0
             for k, (v, (im, bgr)) in enumerate(zip(views, used_images)):
-                progress("room_plan", 0.6 * k / len(views), f"looking for doors in key frame {k + 1} of {len(views)}")
+                if k not in look:
+                    v.boxes = []
+                    continue
+                done += 1
+                progress("room_plan", 0.6 * done / len(look), f"looking for doors in key frame {done} of {len(look)}")
+                if bgr is None:
+                    bgr = cv2.imread(str(img_dir / im.name), cv2.IMREAD_COLOR)
+                    if bgr is None:
+                        continue
                 if box_provider is not None:
                     v.boxes = list(box_provider(im, bgr))
                 else:

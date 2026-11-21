@@ -158,9 +158,21 @@ def portal_in_arworld(portal: dict, sim: g.Sim3) -> dict:
     return out
 
 
+WEAK_ONLY_REASON = (
+    "only weak localisations so far: a door placed from them can stand metres off, so no alignment is given. "
+    "Point the phone at furniture or walls at eye height and send again"
+)
+
+
 def compute_alignment(lmap: LocMap, observations: list[Observation], opts: AlignOptions | None = None,
-                      include_room: bool = True) -> dict:
-    """``arworld <- map`` from the observations of one AR session, as API JSON."""
+                      include_room: bool = True, weak_frames: int = 0) -> dict:
+    """``arworld <- map`` from the observations of one AR session, as API JSON.
+
+    The observations are frames that were localised well. ``weak_frames`` is how
+    many frames of the request were localised only weakly and so left out: with
+    no observation at all it turns the failure into the one a client can tell
+    apart (``reason_code: "weak_only"``).
+    """
     opts = opts or AlignOptions()
     out: dict = {
         "status": "failed",
@@ -168,7 +180,10 @@ def compute_alignment(lmap: LocMap, observations: list[Observation], opts: Align
         "thresholds": opts.thresholds(),
     }
     if not observations:
-        out["reason"] = "no successfully localised frame with an AR camera pose"
+        if weak_frames:
+            out.update(reason=WEAK_ONLY_REASON, reason_code="weak_only", T_arworld_from_map=None)
+        else:
+            out["reason"] = "no successfully localised frame with an AR camera pose"
         return out
     fixed = lmap.scale_m_per_unit
     try:

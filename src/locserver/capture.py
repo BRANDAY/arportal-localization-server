@@ -254,8 +254,10 @@ def select_frames(
     max_frames: int = 200,
     max_size: int = 1024,
     blur_ratio: float = 0.35,
+    same_pose_m: float = 0.05,
+    same_pose_deg: float = 4.0,
 ) -> tuple[list[SelectedFrame], dict]:
-    """Subsample a capture and reject blurred frames.
+    """Subsample a capture, reject blurred frames and frames that repeat a pose.
 
     1. The capture is cut into windows of ``every`` source frames (derived from
        ``target_fps`` when the source frame rate is known, and enlarged if the
@@ -265,12 +267,23 @@ def select_frames(
     3. Frames whose sharpness is below ``blur_ratio`` x the median of the kept
        frames are dropped.
     4. Images are downscaled to ``max_size`` on the longer side.
+    5. When the frames carry camera poses and there are more than
+       ``max_frames`` of them, the cut drops repeats first: a frame taken
+       within ``same_pose_m`` of an earlier one and turned less than
+       ``same_pose_deg`` from it (the phone stood still, or came back) goes
+       before any frame that shows something new; up to twice ``max_frames``
+       windows are looked at, so that the places freed go to new views. Under
+       the limit every frame stays: on the first real scan dropping all repeats
+       left 131 frames instead of 165 and the phone's clips were recognised a
+       little worse (25 instead of 27 good frames of 156) - a repeat is a view
+       of the same place in other light or with other blur, and that helps.
     """
     info = capture.info
     if every is None:
         every = max(1, round(info.fps / target_fps)) if (info.fps and target_fps) else 1
-    if info.num_frames and info.num_frames / every > max_frames:
-        every = int(np.ceil(info.num_frames / max_frames))
+    room = 2 * max_frames if info.has_metric_poses and same_pose_m > 0 else max_frames
+    if info.num_frames and info.num_frames / every > room:
+        every = int(np.ceil(info.num_frames / room))
 
     # Decode a few candidates per window rather than every frame.
     cand_step = max(1, every // 4)
@@ -288,6 +301,25 @@ def select_frames(
         raise ValueError("capture has no readable frames")
     median = float(np.median([k.sharpness for k in kept]))
     sharp = [k for k in kept if k.sharpness >= blur_ratio * median]
+    n_sharp = len(sharp)
+    if info.has_metric_poses and same_pose_m > 0 and all(k.frame.T_world_from_arcam is not None for k in sharp):
+        new, centers, axes, cos_min = [], [], [], np.cos(np.radians(same_pose_deg))
+        for k in sharp:
+            T = np.asarray(k.frame.T_world_from_arcam, float)
+            if new and ((np.linalg.norm(np.array(centers) - T[:3, 3], axis=1) < same_pose_m) & (np.array(axes) @ T[:3, 2] > cos_min)).any():
+                continue
+            new.append(k)
+            centers.append(T[:3, 3])
+            axes.append(T[:3, 2])
+        if n_sharp > max_frames and len(new) < n_sharp:
+            if len(new) >= max_frames:
+                sharp = new                            # thinned evenly below
+            else:                                      # every new view, and repeats spread over the recording up to the limit
+                rest = [k for k in sharp if not any(k is n for n in new)]
+                idx = np.unique(np.linspace(0, len(rest) - 1, max_frames - len(new)).round().astype(int)) if rest else []
+                keep = {id(k) for k in new} | {id(rest[i]) for i in idx}
+                sharp = [k for k in sharp if id(k) in keep]
+    n_same = n_sharp - min(len(sharp), max_frames) if n_sharp > max_frames else 0
     if len(sharp) > max_frames:
         idx = np.linspace(0, len(sharp) - 1, max_frames).round().astype(int)
         sharp = [sharp[i] for i in idx]
@@ -298,6 +330,7 @@ def select_frames(
         candidates_per_window=max(1, every // cand_step),
         windows=len(kept),
         rejected_blur=len(kept) - len([k for k in kept if k.sharpness >= blur_ratio * median]),
+        dropped_same_pose=n_same,
         selected=len(sharp),
         median_sharpness=round(median, 1),
         blur_ratio=blur_ratio,

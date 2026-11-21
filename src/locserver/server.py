@@ -18,10 +18,10 @@ import numpy as np
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from starlette.concurrency import run_in_threadpool
 
-from . import API_VERSION, SERVICE_ID, __version__, bridge, config, netinfo, wifihint
+from . import API_VERSION, SERVICE_ID, __version__, bridge, config, instancelock, netinfo, roommodel, wifihint
 from . import geometry as g
 from .archive import Archive
 from .capture import Frame, VideoCapture, rotate_image_cw, rotate_intrinsics_cw, sharpness
@@ -52,10 +52,10 @@ MAX_VIDEO_BYTES = 150 * 2**20
 SESSION_TTL_S = 30 * 60
 SESSION_MAX_OBS = 60
 MAX_MESH_BYTES = 200 * 2**20
-CAPABILITIES = ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones"]
+CAPABILITIES = ["recording_upload", "jobs", "room_plan", "auto_portal", "device_log", "monitor_ui", "staff_door", "door_size", "rooms_admin", "service_bridge", "wifi_hint", "several_phones", "room_model", "scan_quality"]
 UI_FILE = Path(__file__).parent / "ui" / "index.html"
 UNTRACKED_PREFIXES = ("/ui", "/monitor", "/favicon", "/docs", "/openapi")  # the panel itself is not a device
-API_REVISION = 6
+API_REVISION = 7
 MAX_ROOMS_TRIED = 6  # rooms one /localize request may try when it has to find the room itself
 
 
@@ -98,6 +98,23 @@ class State:
             self.pipe.sync()
         except Exception as e:  # never block start-up on this
             log.warning("warm-up failed: %s", e)
+        # ... and one whole localisation of a picture of a room against that room: the first request of a phone took
+        # 21 s on a freshly started server (the networks at the real picture size, the matcher at real numbers of
+        # points and the pose solver all start slowly once); with this it is the first phone's 1.5 s like any other.
+        try:
+            for m in self.maps.values():
+                if not m.images or not hasattr(self.localizer, "localize"):
+                    continue
+                img = cv2.imread(str(m.path / "images" / m.images[len(m.images) // 2].name), cv2.IMREAD_COLOR)
+                if img is None:
+                    continue
+                t = time.perf_counter()
+                self.localizer.localize(m, img, None, None, True)
+                self.pipe.sync()
+                log.info("warm-up: one localisation in room %s took %.1f s", m.map_id, time.perf_counter() - t)
+                break
+        except Exception as e:
+            log.warning("warm-up localisation failed: %s", e)
 
     def reload(self) -> list[str]:
         maps = {}
@@ -234,7 +251,25 @@ def _map_extras(m: LocMap) -> dict:
         "vps": (vps := bridge.public_vps(m.meta.get("vps"), _frame_id(m))),
         "recognition": ["self-hosted"] + ([vps["provider"]] if vps and vps["bridge"] and vps["bridge"]["valid"] else []),
         "wifi": wifihint.public(m.meta.get("wifi")),  # how many networks are known for the room - never which
+        "model": _model_row(m),
+        "scan": _scan_row(m),
     }
+
+
+def _model_row(m: LocMap) -> dict:
+    """Is there a 3D model of the room (``GET /maps/{id}/model``), and how large."""
+    info = roommodel.load_info(m.path)
+    if not info:
+        return {"available": False}
+    return {"available": True, **{k: info.get(k) for k in ("vertices", "triangles", "area_m2", "bytes", "created_utc")}}
+
+
+def _scan_row(m: LocMap) -> dict | None:
+    """The verdict on the scan in short; all numbers are ``scan_quality`` of ``GET /maps/{id}``."""
+    q = m.meta.get("scan_quality")
+    if not q:
+        return None
+    return {"verdict": q.get("verdict"), "summary": q.get("summary"), "issues": [i.get("code") for i in q.get("issues") or []]}
 
 
 def _wifi_seen(raw) -> dict:
@@ -271,6 +306,11 @@ def pick_clip_frames(frames: list[Frame], n: int) -> list[Frame]:
     for part in np.array_split(np.arange(len(frames)), n):
         out.append(frames[int(max(part, key=lambda i: sharpness(frames[i].image)))])
     return out
+
+
+def _rank(r) -> tuple:
+    """Order of localisation results: a good one beats a weak one whatever the inlier counts, a weak one beats a failed one."""
+    return (bool(r.success), r.quality == "good", r.num_inliers)
 
 
 def create_app(state: State | None = None, maps_dir: Path | None = None, device: str = "auto",
@@ -708,6 +748,31 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
         m = st.get_map(map_id)
         return {"map_id": m.map_id, "room": m.room() or empty_room("not computed")}
 
+    @app.get("/maps/{map_id}/model/info")
+    def model_info(map_id: str):
+        """Numbers of the room's 3D model (size, box, how it was made); 404 when the room has none."""
+        m = st.get_map(map_id)
+        info = roommodel.load_info(m.path)
+        if not info:
+            raise HTTPException(404, f"map {m.map_id!r} has no room model (built before server 0.8, or its depth failed): "
+                                     f"POST /maps/{m.map_id}/room/rebuild makes one")
+        return {"map_id": m.map_id, "frame_id": _frame_id(m), "scale_m_per_unit": m.scale_m_per_unit, "model": info}
+
+    @app.get("/maps/{map_id}/model")
+    def model_get(map_id: str, format: str = "bin"):
+        """The room as one coloured surface, in the frame of the map. ``format=bin`` (default, see the API notes) or ``ply``."""
+        m = st.get_map(map_id)
+        if not roommodel.load_info(m.path):
+            raise HTTPException(404, f"map {m.map_id!r} has no room model")
+        path = m.path / roommodel.MODEL_BIN
+        if format == "bin":
+            return FileResponse(path, media_type="application/octet-stream", filename=f"{m.map_id}-model.bin",
+                                headers={"Cache-Control": "no-cache"})
+        if format != "ply":
+            raise HTTPException(422, "format must be 'bin' or 'ply'")
+        return Response(roommodel.model_ply(roommodel.read_model(path)), media_type="application/octet-stream",
+                        headers={"Content-Disposition": f'attachment; filename="{m.map_id}-model.ply"'})
+
     @app.post("/maps/{map_id}/room/rebuild", status_code=202)
     def room_rebuild(
         map_id: str,
@@ -795,7 +860,7 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
                 continue
             r = st.localizer.localize(lm, fr.image, intr, device_id, map_camera)
             c.update(tried=True, success=bool(r.success), quality=r.quality, num_inliers=int(r.num_inliers))
-            if best is None or (r.success, r.num_inliers) > (best[1].success, best[1].num_inliers):
+            if best is None or _rank(r) > _rank(best[1]):
                 best = (lm, r)
         return best[0], best[1], ordered
 
@@ -982,6 +1047,7 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
         wifi: str | None = Form(None, description='JSON list of the Wi-Fi networks the phone sees - only orders the candidate rooms'),
         max_rooms: int = Form(3, description="without map_id: how many rooms are tried at most"),
         only_with_door: bool = Form(False, description="without map_id: only rooms whose door was placed by the staff"),
+        all_frames: bool = Form(False, description="a clip: localise every picked frame, also after a good one (for measurements)"),
     ):
         t_req = time.perf_counter()
         # which room? given - or the one this AR session is already aligned with - or found below
@@ -1052,11 +1118,11 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
             "headers": {k: request.headers.get(k) for k in ("x-device-id", "x-device-name", "x-session-id", "x-app-version", "x-device-role")},
             "intrinsics": intr, "intrinsics_mode": intrinsics_mode, "image_rotation_cw": image_rotation_cw, "max_frames": max_frames,
             "ar_pose": ar_pose, "ar_position": ar_position, "ar_rotation": ar_rotation, "ar_forward": ar_forward, "ar_up": ar_up,
-            "wifi_networks_sent": len(seen), "max_rooms": max_rooms, "only_with_door": only_with_door,
+            "wifi_networks_sent": len(seen), "max_rooms": max_rooms, "only_with_door": only_with_door, "all_frames": all_frames,
             "upload": "image" if image is not None else "video", "has_session_jsonl": session_jsonl is not None})
 
         # ---- decode the upload into upright frames (+ per-frame AR poses) ---- #
-        load: dict = {"frames_asked": 1, "frames_used": 1}
+        load: dict = {"frames_asked": 1, "frames_used": 1, "stopped_early": False}
         frames: list[Frame] = []
         pairing = None
         if image is not None:
@@ -1128,15 +1194,22 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
                                        elapsed_ms=round((time.perf_counter() - t_room) * 1000, 1))
                     results.append((frames[0], first))
                     rest = frames[1:]
+                # One good frame is enough: in a clip that is recognised nearly every frame is, so the others only cost
+                # time. The exception is a map without scale whose clip brings an AR pose per frame: its scale comes
+                # from frames taken apart, one frame cannot give it.
+                every = all_frames or (pairing == "session_jsonl" and m.scale_m_per_unit is None)
                 for fr in rest:
+                    if not every and any(r.quality == "good" for _, r in results):
+                        break
                     results.append((fr, st.localizer.localize(m, fr.image, intr, device_id, intrinsics_mode == "map")))
+                load.update(frames_used=len(results), stopped_early=len(results) < len(frames))
             except HTTPException:
                 raise
             except Exception as e:  # e.g. CUDA out of memory: report, do not crash the server
                 log.exception("localisation crashed")
                 raise HTTPException(500, f"localisation error: {type(e).__name__}: {e}")
         room_choice["chosen"] = m.map_id
-        best_fr, best = max(results, key=lambda fr_r: (fr_r[1].success, fr_r[1].num_inliers))
+        best_fr, best = max(results, key=lambda fr_r: _rank(fr_r[1]))
         out = localization_dict(best, m, st.loc_opts)
         out["frames"] = [
             {
@@ -1153,13 +1226,18 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
         out["best_frame_index"] = best_fr.index
 
         # ---- alignment to the AR session ---- #
-        new_obs = []
+        # Only good frames become observations. In the first run on a phone the good frames put the door within
+        # 0-11 cm of each other, the weak ones 1.6-2.4 m off: a weak frame must never place or move a door.
+        new_obs, weak = [], 0
         for fr, r in results:
             T_ar = fr.T_world_from_arcam
             if T_ar is None and pairing == "assumed_static" and fr is best_fr:
                 T_ar = T_ar_req
             if r.success and T_ar is not None:
-                new_obs.append(Observation(r.T_cvcam_from_map, T_ar, float(r.num_inliers)))
+                if r.quality == "good":
+                    new_obs.append(Observation(r.T_cvcam_from_map, T_ar, float(r.num_inliers)))
+                else:
+                    weak += 1
         obs = new_obs
         if session_id:
             s = st.session(session_id, m.map_id)
@@ -1168,10 +1246,9 @@ def create_app(state: State | None = None, maps_dir: Path | None = None, device:
             out["session"] = {"session_id": session_id, "num_observations": len(obs)}
         has_ar = T_ar_req is not None or pairing == "session_jsonl"
         if has_ar or (session_id and obs):
-            al = compute_alignment(m, obs, st.align_opts, include_room=include_room)
+            al = compute_alignment(m, obs, st.align_opts, include_room=include_room, weak_frames=weak)
             _maybe_persist_scale(m, al, persist_scale)
             al["ar_pose_pairing"] = pairing
-            al["from_weak_localization_only"] = bool(new_obs) and all(r.quality != "good" for _, r in results if r.success)
             out["alignment"] = strip_private(al)
         else:
             out["alignment"] = None
@@ -1251,9 +1328,24 @@ def main(argv: list[str] | None = None) -> int:
             f"http://127.0.0.1:{a.port}/ui" if netinfo.is_our_server(other)
             else f"  Another program listens on port {a.port}. Close it, or start this server on another port:  --port {a.port + 1}", "")
         return 3
+    # One server per data folder, and before create_app: at its start a server tidies up unfinished builds,
+    # which would be the running builds of a server that already works with these folders.
+    try:
+        locks = instancelock.lock_folders([config.work_dir(), Path(a.maps_dir) if a.maps_dir else config.maps_dir()], port=a.port)
+    except instancelock.FolderInUse as e:
+        theirs = e.holder.get("port")
+        say(f"COULD NOT START: another localization server already works with the data folder {e.folder}",
+            f"  It is {instancelock.describe(e.holder)}." + (f" Use that one: http://127.0.0.1:{theirs}/ui" if theirs else ""),
+            "  Two servers on one data folder would delete each other's map builds. Close the other one first,",
+            "  or give this one its own folders (LOCSERVER_MAPS_DIR and LOCSERVER_WORK).", "")
+        return 4
+    except OSError as e:  # a folder that cannot be locked at all (an odd file system) must not keep the server from starting
+        log.warning("could not lock the data folders (%s) - going on without the protection against a second server", e)
+        locks = []
     try:
         app = create_app(maps_dir=Path(a.maps_dir) if a.maps_dir else None, device=a.device, server_name=a.name)
     except Exception as e:  # say it in one line before the long trace
+        instancelock.release_all(locks)
         say(f"COULD NOT START: {type(e).__name__}: {e}",
             "  Out of memory? Close other programs that use the graphics card (games) and start again.",
             "  Missing module or file? Run `uv sync` once in this folder (README, Setup).", "")
@@ -1277,7 +1369,10 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(target=announce, name="locserver-announce", daemon=True).start()
     # no line per request in the window: the panel polls every second and would push the address out of sight
     # (requests are in the panel's log and, with --keep-incoming, in requests.jsonl)
-    uvicorn.run(app, host=a.host, port=a.port, log_level=a.log_level.lower(), access_log=a.access_log)
+    try:
+        uvicorn.run(app, host=a.host, port=a.port, log_level=a.log_level.lower(), access_log=a.access_log)
+    finally:  # the system gives the locks up with the process anyway; this is for a caller that lives on
+        instancelock.release_all(locks)
     say("", "The server has stopped.", "")
     return 0
 

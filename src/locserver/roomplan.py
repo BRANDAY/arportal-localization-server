@@ -61,6 +61,8 @@ class PlanOptions:
     max_walls: int = 10
     furniture_depth_m: float = 1.2  # a parallel plane this close behind makes the front one furniture
     corner_snap_m: float = 0.8
+    square_max_deg: float = 12.0  # a wall this close to one of the room's two main directions is turned onto it (0 = off)
+    square_min_share: float = 0.5  # ... when at least this share of the wall surface lies within 10 deg of them
     cell_m: float = 0.05  # opening grid on a wall
     through_margin_m: float = 0.30
     door_width_m: tuple = (0.55, 1.6)
@@ -399,6 +401,47 @@ def refine_walls(walls: list[Wall], sparse: np.ndarray, opts: PlanOptions) -> in
                 w.n, w.d = n, float(c @ n)
                 w.u0, w.u1 = sorted(float(e @ w.t) for e in ends)
     return moved
+
+
+def main_directions(n2: np.ndarray, weights: np.ndarray | None = None) -> tuple[float, float]:
+    """The room's main direction (radians, modulo 90 degrees) from the normals of wall points, and the share of them within 10 degrees."""
+    a = np.arctan2(n2[:, 1], n2[:, 0])
+    w = np.ones(len(a)) if weights is None else weights
+    dom = float(np.arctan2((w * np.sin(4 * a)).sum(), (w * np.cos(4 * a)).sum()) / 4)
+    r = (a - dom + np.pi / 4) % (np.pi / 2) - np.pi / 4
+    return dom, float(w[np.abs(r) < np.radians(10)].sum() / max(w.sum(), 1e-9))
+
+
+def square_walls(walls: list[Wall], n2: np.ndarray, opts: PlanOptions) -> dict:
+    """Turn walls that are nearly square to the room onto its main directions, each about its own middle.
+
+    A wall fitted to depth of a network leans a few degrees either way: on the
+    first real room (2026-11-21) the walls were 1-11 degrees off the main
+    directions and the corners 83-97 degrees, while the fused surface of the
+    same room put 71 % of its vertical area within 10 degrees of two square
+    directions. Rooms with a slanted wall keep it: only walls within
+    ``square_max_deg`` turn, and only when most of the wall surface agrees.
+    """
+    if opts.square_max_deg <= 0 or len(n2) < 100 or not walls:
+        return {"applied": False}
+    dom, share = main_directions(n2)
+    out = {"applied": False, "main_direction_deg": round(float(np.degrees(dom)), 2), "share_within_10_deg": round(share, 3)}
+    if share < opts.square_min_share:
+        return out
+    turned = []
+    for w in walls:
+        a = np.arctan2(w.n[1], w.n[0])
+        r = (a - dom + np.pi / 4) % (np.pi / 2) - np.pi / 4
+        if abs(r) > np.radians(opts.square_max_deg) or abs(r) < 1e-6:
+            continue
+        mid = w.point((w.u0 + w.u1) / 2, 0)[:2]
+        ends = [w.point(w.u0, 0)[:2], w.point(w.u1, 0)[:2]]
+        w.n = np.array([np.cos(a - r), np.sin(a - r)])
+        w.d = float(mid @ w.n)
+        w.u0, w.u1 = sorted(float(e @ w.t) for e in ends)
+        turned.append(round(float(np.degrees(r)), 1))
+    out.update(applied=True, turned_deg=turned)
+    return out
 
 
 def snap_walls(walls: list[Wall], opts: PlanOptions) -> tuple[list[Wall], list[dict]]:
@@ -790,6 +833,7 @@ def compute_room_plan(views: list[DepthView], up, extra_points: np.ndarray | Non
             too_low.append(c)
     walls = _drop_furniture(_drop_duplicates(drop_outside_walls(walls, views, B, opts), opts), opts)
     refined = refine_walls(walls, np.asarray(sparse_points, float) @ B.T, opts) if sparse_points is not None and len(sparse_points) else 0
+    squared = square_walls(walls, n2, opts)
     walls, corners = snap_walls(walls, opts)
     for k, w in enumerate(walls):
         w.id = f"w{k}"
@@ -848,7 +892,7 @@ def compute_room_plan(views: list[DepthView], up, extra_points: np.ndarray | Non
     if openings and openings[0]["confidence"] >= opts.auto_portal_min_confidence:
         room["best_opening_id"] = "o0"
     room["thresholds"] = {"auto_portal_min_confidence": opts.auto_portal_min_confidence}
-    room["stats"] = {"views": len(views), "points": int(len(pts)), "walls_refined_with_map_points": int(refined),
+    room["stats"] = {"views": len(views), "points": int(len(pts)), "walls_refined_with_map_points": int(refined), "squared": squared,
                      "wall_candidates_seen_too_low": [{k: v for k, v in t.items() if not k.startswith("_")} for t in too_low], "options": {k: v for k, v in asdict(opts).items() if k != "seed"}}
     return room
 

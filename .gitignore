@@ -17,6 +17,7 @@ data/input/*
 !data/input/.gitkeep
 data/maps/*
 !data/maps/.gitkeep
+data/maps-trial/
 data/calibration/
 data/datasets/
 data/work/

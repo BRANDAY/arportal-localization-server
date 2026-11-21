@@ -72,7 +72,7 @@ def builder(room=None, fail=None, gate=None):
 def test_health_announces_v2_without_breaking_v1_clients(tmp_path):
     c = make_server(tmp_path, builder())
     h = c.get("/health").json()
-    assert h["api_version"] == 1 and h["api_revision"] == 6# the current app accepts only api_version 1
+    assert h["api_version"] == 1 and h["api_revision"] == 7  # the current app accepts only api_version 1
     assert {"recording_upload", "jobs", "room_plan", "auto_portal"} <= set(h["capabilities"])
     assert h["jobs"] == {"running": 0, "queued": 0}
 
@@ -83,7 +83,7 @@ def test_recording_upload_builds_a_map_in_the_background(tmp_path, plan):
     assert r.status_code == 202, r.text
     job = r.json()["job"]
     assert job["kind"] == "build_map" and job["map_id"] == "room" and job["state"] in ("queued", "running", "succeeded")
-    assert job["stage_count"] == 7 and 0 <= job["progress"] <= 1
+    assert job["stage_count"] == 8 and 0 <= job["progress"] <= 1
     done = c.state_obj.jobs.wait(job["job_id"])
     assert done["state"] == "succeeded" and done["progress"] == 1.0 and done["error"] is None
     assert done["result"]["map_id"] == "room" and done["finished_utc"] and done["eta_s"] is None
@@ -153,7 +153,7 @@ def test_progress_is_monotonic_and_weighted():
     assert seen == sorted(seen) and seen[-1] < 1.0 and job.progress == seen[-1]
     assert sum(w for _, w in STAGES["build_map"]) == pytest.approx(1.0) and sum(w for _, w in STAGES["room_plan"]) == pytest.approx(1.0)
     pub = job.public()
-    assert pub["stage"] == "finalize" and pub["stage_index"] == 7 and pub["stage_count"] == 7  # ...nor the stage
+    assert pub["stage"] == "finalize" and pub["stage_index"] == 8 and pub["stage_count"] == 8  # ...nor the stage
 
 
 def test_unfinished_jobs_of_a_stopped_server_are_reported_failed(tmp_path):
@@ -187,7 +187,7 @@ def test_real_worker_process_end_to_end(tmp_path):
     c = make_server(tmp_path, None)
     assert c.get("/maps/metric_room/room").json()["room"]["status"] == "unavailable"
     r = c.post("/maps/metric_room/room/rebuild")
-    assert r.status_code == 202 and r.json()["job"]["kind"] == "room_plan" and r.json()["job"]["stage_count"] == 3
+    assert r.status_code == 202 and r.json()["job"]["kind"] == "room_plan" and r.json()["job"]["stage_count"] == 4
     done = c.state_obj.jobs.wait(r.json()["job"]["job_id"], timeout=120)
     assert done["state"] == "succeeded", done
     assert done["result"]["room"]["status"] == "unavailable" and "gravity" in done["result"]["warnings"][0]

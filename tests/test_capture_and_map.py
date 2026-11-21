@@ -104,6 +104,35 @@ def test_select_frames_respects_max_frames():
     assert len(sel) <= 10 and stats["window"] == 9
 
 
+def test_select_frames_drops_frames_that_repeat_a_pose():
+    class Posed(FakeCapture):
+        """30 frames walking 10 cm per frame, 30 frames standing (a hand trembles by millimetres), 30 walking on."""
+
+        def __init__(self, images):
+            super().__init__(images)
+            self.info.has_metric_poses = True
+
+        def frames(self, step=1):
+            for i in range(0, len(self.images), step):
+                T = np.eye(4)
+                T[0, 3] = 0.1 * (min(i, 30) + max(0, i - 60)) + 0.002 * (i % 3)
+                yield Frame(i, self.images[i], i / 30.0, T)
+
+    imgs = [textured(i) for i in range(90)]
+    sel, stats = select_frames(Posed(imgs), target_fps=30.0, max_frames=100, max_size=80)
+    assert stats["dropped_same_pose"] == 0 and len(sel) == 90             # under the limit every frame stays
+    # over the limit the repeats go first: twice as many windows are looked at, the standing ones are left out
+    sel, stats = select_frames(Posed(imgs), target_fps=30.0, max_frames=30, max_size=80)
+    assert stats["window"] == 2 and len(sel) == 30 and stats["dropped_same_pose"] == 15
+    assert sum(30 < s.frame.index < 60 for s in sel) == 0
+    # fewer new views than places: the rest is filled with repeats spread over the standing part
+    sel, stats = select_frames(Posed(imgs), target_fps=30.0, max_frames=40, max_size=80)
+    assert len(sel) == 40 and 1 <= sum(30 < s.frame.index < 60 for s in sel) <= 10
+    # no poses: nothing changes
+    sel, stats = select_frames(FakeCapture(imgs), target_fps=30.0, max_frames=30, max_size=80)
+    assert stats["window"] == 3 and stats["dropped_same_pose"] == 0 and len(sel) == 30
+
+
 def test_image_folder_and_open_capture(tmp_path):
     for i in range(3):
         cv2.imwrite(str(tmp_path / f"im_{i}.png"), textured(i))

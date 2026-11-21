@@ -89,21 +89,25 @@ def send(c, video, **data):
 def test_localize_says_how_long_it_waited_and_uses_fewer_frames_under_load(tmp_path):
     c = make_server(tmp_path)
     loc, video = c.state_obj.localizer, clip(tmp_path)
+    # all_frames: this test counts the frames the line allows; without it a clip is answered at its first good
+    # frame (tests/test_good_frames.py), and every frame of the stub is good
     loc.queue += [POSE] * 3
-    out = send(c, video, session_id="v1")
-    assert len(out["frames"]) == 3 and out["load"] == {**out["load"], "frames_asked": 3, "frames_used": 3, "ahead": 0}
+    out = send(c, video, session_id="v1", all_frames="1")
+    assert len(out["frames"]) == 3
+    assert out["load"] == {**out["load"], "frames_asked": 3, "frames_used": 3, "stopped_early": False, "ahead": 0}
     assert out["load"]["waited_ms"] < 1000 and out["load"]["next_request_after_s"] == 1.0
     h = c.get("/health").json()
     assert h["localize"]["running"] == 0 and h["localize"]["waiting"] == 0 and h["localize"]["served"] == 1
     for _ in range(2):  # a clip with one AR pose gives one observation: three requests make the session "aligned"
         loc.queue += [POSE] * 3
-        send(c, video, session_id="v1")
+        send(c, video, session_id="v1", all_frames="1")
     assert "several_phones" in h["capabilities"] and h["api_revision"] >= 6
 
     c.state_obj.gpu_lock = BusyGate(waiting=2)  # two other phones stand in line
     loc.queue += [POSE] * 2
-    new = send(c, video, session_id="v2")       # a session that still looks for the room: two frames
+    new = send(c, video, session_id="v2", all_frames="1")  # a session that still looks for the room: two frames
     assert len(new["frames"]) == 2 and new["load"]["frames_used"] == 2 and new["load"]["frames_asked"] == 3
+    assert new["load"]["stopped_early"] is False  # fewer frames because of the line is not "stopped early"
     n = len(loc.calls)
     loc.queue += [POSE]
     again = send(c, video, session_id="v1")     # session v1 has three observations already: one frame refines
@@ -119,7 +123,7 @@ def test_an_aligned_session_is_told_to_slow_down(tmp_path):
     c = make_server(tmp_path)
     loc, video = c.state_obj.localizer, clip(tmp_path)
     for _ in range(6):
-        loc.queue += [POSE] * 3
+        loc.queue += [POSE]  # the first good frame answers the clip
         out = send(c, video, session_id="v1")
     assert out["alignment"]["observations_used"] >= 6 and out["load"]["next_request_after_s"] == 5.0
 
@@ -139,8 +143,8 @@ def test_five_phones_at_once_all_get_their_answer(tmp_path):
 
     def phone(i):
         try:
-            for _ in range(2):
-                answers.append(send(c, video, session_id=f"phone-{i}"))
+            for _ in range(2):  # all_frames: "did less" below has to come from the line, not from a first good frame
+                answers.append(send(c, video, session_id=f"phone-{i}", all_frames="1"))
         except Exception as e:  # noqa: BLE001
             errors.append(repr(e))
 

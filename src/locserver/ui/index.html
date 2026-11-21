@@ -5,24 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AR Portal server</title>
 <!-- Monitoring panel of the localisation server. One self-contained file: no build step, nothing
-     loaded from the internet. Data: GET /monitor/state, /monitor/feed, /monitor/map/{id} (polled). -->
+     loaded from the internet. Data: GET /monitor/state, /monitor/feed, /monitor/map/{id} (polled); once per room:
+     GET /maps/{id}/model (3D view, WebGL) and /maps/{id} (scan quality). The door is saved with PUT /maps/{id}/anchors/portal. -->
 <style>
 :root {
   color-scheme: light;
   --bg: #f3f2ee; --surface: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --muted: #898781; --line: #e1e0d9;
   --accent: #2a78d6; --good: #0ca30c; --warning: #fab219; --serious: #ec835a; --critical: #d03b3b; --good-text: #006300;
+  --door: #e8590c;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
     color-scheme: dark;
     --bg: #111110; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781; --line: #2c2c2a;
-    --accent: #3987e5; --good-text: #0ca30c;
+    --accent: #3987e5; --good-text: #0ca30c; --door: #ff7a1a;
   }
 }
 :root[data-theme="dark"] {
   color-scheme: dark;
   --bg: #111110; --surface: #1a1a19; --ink: #f0efec; --ink2: #c3c2b7; --muted: #898781; --line: #2c2c2a;
-  --accent: #3987e5; --good-text: #0ca30c;
+  --accent: #3987e5; --good-text: #0ca30c; --door: #ff7a1a;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 13px/1.45 "Segoe UI", system-ui, -apple-system, Roboto, sans-serif; }
@@ -90,6 +92,20 @@ canvas { display: block; width: 100%; height: 440px; border: 1px solid var(--lin
 #status.up { border-left-color: var(--good); } #status.up .big i { color: var(--good); }
 #status.down { border-left-color: var(--critical); background: color-mix(in srgb, var(--critical) 9%, var(--surface)); } #status.down .big i { color: var(--critical); }
 #status.wait .big i { animation: blink 1s infinite; } @keyframes blink { 50% { opacity: .25; } }
+[hidden] { display: none !important; }
+#gl { cursor: grab; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.note3d { color: var(--ink2); margin-top: 6px; }
+.tools { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin-top: 6px; }
+.tools .grow { flex: 1; }
+.tools label { display: inline-flex; gap: 5px; align-items: center; white-space: nowrap; }
+.tools input[type=number] { width: 66px; font: inherit; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 2px 5px; }
+.tools input[type=range] { width: 150px; max-width: 40vw; accent-color: var(--door); }
+.doored { border: 1px solid var(--door); border-left-width: 4px; border-radius: 8px; padding: 8px 10px; }
+.scanq { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.scanq .head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; margin-bottom: 4px; }
+.scanq .issue { margin: 4px 0 0; padding-left: 10px; border-left: 3px solid var(--warning); }
+.scanq .kv { margin-top: 6px; }
 </style>
 </head>
 <body>
@@ -129,9 +145,27 @@ canvas { display: block; width: 100%; height: 440px; border: 1px solid var(--lin
   <section class="card c7">
     <h2>Room plan <select id="mapsel" title="Map to show"></select><span class="grow"></span>
       <button id="vtop" class="on">Top view</button><button id="v3d">3D</button></h2>
-    <div class="planwrap"><canvas id="plan"></canvas><div class="tip" id="tip"></div></div>
+    <div class="planwrap"><canvas id="plan"></canvas><canvas id="gl" hidden></canvas><div class="tip" id="tip"></div></div>
+    <div class="note3d" id="note3d" hidden></div>
+    <div class="tools" id="tools3d" hidden>
+      <button id="vreset" title="Look at the whole room again">Reset view</button>
+      <label title="Hide the surfaces near the ceiling so one looks into the room from above"><input type="checkbox" id="cutceil" checked> cut away the ceiling</label>
+      <span class="grow"></span>
+      <button id="dedit">Edit door</button>
+    </div>
+    <div class="tools doored" id="doored" hidden>
+      <b>Door</b>
+      <label title="Turn the door about the vertical">turn <input type="range" id="dyaw" min="-180" max="180" step="1"><input type="number" id="dyawn" min="-180" max="180" step="1">&deg;</label>
+      <button id="dwall" title="Turn the door so that it faces the room like the nearest wall">turn to the nearest wall</button>
+      <label>width <input type="number" id="dw" min="0.3" max="6" step="0.05"> m</label>
+      <label>height <input type="number" id="dh" min="0.3" max="6" step="0.05"> m</label>
+      <div class="mono ink2" id="dnums" style="flex-basis:100%"></div>
+      <button id="dsave" class="primary">Save</button><button id="dcancel">Cancel</button>
+      <span id="dmsg" class="ink2"></span>
+    </div>
     <div class="legend" id="legend"></div>
     <div class="ink2" id="plansum" style="margin-top:6px"></div>
+    <div class="scanq" id="scanq" hidden></div>
   </section>
 
   <section class="card c12">
@@ -353,13 +387,16 @@ async function pollFeed() {
 }
 
 // ---------------------------------------------------------------- room plan (orthographic view, drag to orbit)
-const view = { yaw: 0, tilt: 0, zoom: 1, panX: 0, panY: 0 };
+// "3D" shows the room's 3D model (WebGL, below) when the room has one, else this plan tilted.
+const view = { yaw: 0, tilt: 0, zoom: 1, panX: 0, panY: 0, mode3d: false };
 let hits = [];
-$("vtop").onclick = () => { view.yaw = 0; view.tilt = 0; view.zoom = 1; view.panX = view.panY = 0; setMode(); drawPlan(); };
-$("v3d").onclick = () => { view.yaw = -0.6; view.tilt = 0.95; setMode(); drawPlan(); };
-function setMode() { $("vtop").classList.toggle("on", view.tilt < 0.05); $("v3d").classList.toggle("on", view.tilt >= 0.05); }
+$("vtop").onclick = () => { view.yaw = 0; view.tilt = 0; view.zoom = 1; view.panX = view.panY = 0; view.mode3d = false; setMode(); drawPlan(); };
+$("v3d").onclick = () => { view.yaw = -0.6; view.tilt = 0.95; view.mode3d = true; setMode(); drawPlan(); };
+function setMode() { $("vtop").classList.toggle("on", !view.mode3d); $("v3d").classList.toggle("on", view.mode3d); }
 $("mapsel").onchange = () => { selMap = $("mapsel").value; pickedMap = true; if (S) renderMaps(S.maps); loadMap(true); };
 async function loadMap(force) {
+  if (ED && ED.map !== selMap) endEdit();
+  ensureModel(); loadScan();
   if (!selMap) { mapData = null; drawPlan(); return; }
   const m = S.maps.find(x => x.map_id === selMap), key = selMap + "|" + (m ? m.created_utc + m.room_status + m.portal_source : "");
   if (!force && key === mapKey && mapData) {  // only the phone position can have changed
@@ -376,13 +413,17 @@ function basis(up) {  // rows e1, e2, up: map -> plan frame (h along up)
   return [e1, e2, u];
 }
 function drawPlan() {
+  const in3d = show3d();
+  $("plan").hidden = in3d; $("gl").hidden = !in3d; $("tools3d").hidden = !in3d; $("doored").hidden = !in3d || !ED;
+  note3d();
+  if (in3d) { $("tip").style.display = "none"; planSummary(); syncEdit(); draw3dSoon(); return; }
   const cv = $("plan"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
   if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
   const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
   const css = getComputedStyle(document.documentElement), C = n => css.getPropertyValue(n).trim();
   hits = [];
   g.font = "12px 'Segoe UI', system-ui, sans-serif";
-  if (!mapData) { g.fillStyle = C("--muted"); g.fillText(selMap ? "Loading…" : "No map selected.", 14, 24); $("plansum").textContent = ""; $("legend").replaceChildren(); return; }
+  if (!mapData) { g.fillStyle = C("--muted"); g.fillText(selMap ? "Loading…" : "No map selected.", 14, 24); $("plansum").textContent = ""; $("legend").replaceChildren(); $("legend").dataset.mode = ""; return; }
   const B = basis(mapData.up), room = mapData.room, toPlan = p => [0, 1, 2].map(i => B[i][0] * p[0] + B[i][1] * p[1] + B[i][2] * p[2]);
   const cy_ = Math.cos(view.yaw), sy_ = Math.sin(view.yaw), ct = Math.cos(view.tilt), st = Math.sin(view.tilt);
   const flat = p => { const q = toPlan(p), a = q[0] * cy_ - q[1] * sy_, b = q[0] * sy_ + q[1] * cy_; return [a, b * ct + q[2] * st]; };
@@ -451,16 +492,29 @@ function drawPlan() {
   }
   // scale bar
   const bar = 1 * sc; if (mapData.metric && bar > 20 && bar < W) { g.strokeStyle = C("--ink2"); g.lineWidth = 2; g.beginPath(); g.moveTo(14, H - 14); g.lineTo(14 + bar, H - 14); g.stroke(); g.fillStyle = C("--ink2"); g.fillText("1 m", 18 + bar, H - 10); }
-  // summary + legend
-  const fl = room.floor;
+  planSummary();
+}
+function planSummary() {  // the line under the view and the legend (of the plan or of the 3D model)
+  const room = mapData.room, po = mapData.portal, fl = room.floor;
   $("plansum").textContent = room.status === "unavailable" ? "No room plan: " + (room.reason || "not computed") + ". Showing the map's points and the camera path only."
     : "Plan " + room.status + " · " + room.walls.length + " walls · " + room.corners.length + " corners · " + room.openings.length + " openings" +
       (room.height ? " · ceiling height " + room.height.toFixed(2) + " m" : "") + (fl ? " · floor at " + fl.level.toFixed(2) + " m" : "") +
       " · door: " + (po.source === "manual" ? "placed by the staff" + (po.width ? ", " + po.width.toFixed(2) + " × " + po.height.toFixed(2) + " m" : "")
         : po.source === "auto" ? "only suggested by the server" : po.source) + (po.reason ? " (" + po.reason + ")" : "") + (room.sources && room.sources.length ? " · from: " + room.sources.join(", ") : "") +
       (room.status !== "ok" && room.reason ? ". Why partial: " + room.reason + "." : "");
-  const lg = $("legend"); if (!lg.childElementCount) {
+  const lg = $("legend"), mode = show3d() ? "3d" : "plan";
+  if (lg.dataset.mode !== mode) {
+    lg.dataset.mode = mode; lg.replaceChildren();
     const item = (svg, text) => { const s = el("span"); s.innerHTML = svg; s.append(document.createTextNode(text)); return s; };
+    if (mode === "3d") {
+      lg.append(item('<svg width="22" height="10"><line x1="1" y1="5" x2="21" y2="5" stroke="currentColor" stroke-width="1.5"/></svg>', "wall outline"),
+        item('<svg width="22" height="10"><line x1="1" y1="5" x2="21" y2="5" stroke="var(--accent)" stroke-width="1.5"/></svg>', "door opening found"),
+        item('<svg width="14" height="12"><rect x="2" y="1" width="10" height="10" fill="var(--door)" fill-opacity=".5" stroke="var(--door)"/></svg>', "door"),
+        item('<svg width="22" height="10"><line x1="1" y1="5" x2="21" y2="5" stroke="var(--muted)"/></svg>', "floor (1 m grid)"),
+        item('<svg width="10" height="10"><rect x="3" y="3" width="4" height="4" fill="var(--ink2)"/></svg>', "camera of the scan"),
+        el("span", "muted", "left-drag: turn · right- or shift-drag: move · wheel: zoom · click the door to edit it"));
+      return;
+    }
     lg.append(item('<svg width="22" height="10"><line x1="1" y1="5" x2="21" y2="5" stroke="currentColor" stroke-width="3"/></svg>', "wall"),
       item('<svg width="10" height="10"><rect x="1" y="1" width="8" height="8" fill="currentColor"/></svg>', "corner"),
       item('<svg width="22" height="10"><line x1="1" y1="5" x2="21" y2="5" stroke="var(--accent)" stroke-width="5"/></svg>', "door opening (dashed: not used)"),
@@ -484,6 +538,344 @@ function drawPlan() {
   cv.addEventListener("wheel", e => { e.preventDefault(); view.zoom = Math.max(0.3, Math.min(8, view.zoom * (e.deltaY < 0 ? 1.12 : 0.89))); drawPlan(); }, { passive: false });
   window.addEventListener("resize", drawPlan);
 })();
+
+// ---------------------------------------------------------------- 3D model of the room (plain WebGL)
+// The model (GET /maps/{id}/model, format LRM1) is loaded once per room and model version. Everything is
+// drawn in map coordinates; "up" is mapData.up. Horizontal frame F: r0 = map +Z laid flat, r90 = up x r0,
+// so for the phone's maps (+Y up) a yaw is the turn about +Y, as in the app (door: width along x, up y, into the room z).
+const Vc = {
+  add: (a, b) => a.map((v, i) => v + b[i]), sub: (a, b) => a.map((v, i) => v - b[i]), mul: (a, s) => a.map(v => v * s),
+  dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2], cross: (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  unit: a => { const l = Math.hypot(...a) || 1; return a.map(v => v / l); },
+};
+const M = { key: "", loading: "", err: "", ready: false, nTri: 0, bmin: null, bmax: null, info: null };
+const cam = { t: [0, 0, 0], yaw: 0.8, pitch: 0.85, dist: 8, fov: 0.8, key: "" };
+let ED = null, GL = null, raf = 0;
+const mapRow = () => S && S.maps.find(x => x.map_id === selMap);
+const scaleM = () => { const m = mapRow(); return m && m.scale_m_per_unit ? m.scale_m_per_unit : 1; };
+const modelKey = () => { const m = mapRow(); return m && m.model && m.model.available ? m.map_id + "|" + m.model.created_utc : ""; };
+const show3d = () => !!(view.mode3d && mapData && M.ready && M.key === modelKey() && mapData.map_id === selMap);
+function hf() {
+  const u = Vc.unit(mapData ? mapData.up : [0, 1, 0]);
+  let r0 = Vc.sub([0, 0, 1], Vc.mul(u, u[2])); if (Math.hypot(...r0) < 0.3) r0 = Vc.sub([1, 0, 0], Vc.mul(u, u[0]));
+  r0 = Vc.unit(r0); return { u, r0, r90: Vc.cross(u, r0) };
+}
+const hdir = (F, yaw) => Vc.add(Vc.mul(F.r0, Math.cos(yaw)), Vc.mul(F.r90, Math.sin(yaw)));
+const yawOf = (F, v) => Math.atan2(Vc.dot(v, F.r90), Vc.dot(v, F.r0));
+const deg = r => { let d = r * 180 / Math.PI; while (d > 180) d -= 360; while (d <= -180) d += 360; return d; };
+function hRange(F) {  // height range of the model's box along up
+  const b = [M.bmin, M.bmax], hs = [];
+  for (let i = 0; i < 8; i++) hs.push(Vc.dot([b[i & 1][0], b[(i >> 1) & 1][1], b[(i >> 2) & 1][2]], F.u));
+  return [Math.min(...hs), Math.max(...hs)];
+}
+function floorH(F) { const f = mapData.room && mapData.room.floor; return f && f.level != null ? f.level : hRange(F)[0]; }
+function cutH(F) {
+  if (!$("cutceil").checked) return 1e9;
+  const c = mapData.room && mapData.room.ceiling;
+  return c && c.level != null ? c.level - 0.3 / scaleM() : hRange(F)[1] - 0.5 / scaleM();
+}
+
+function note3d() {
+  const box = $("note3d"), m = mapRow();
+  let t = "";
+  if (view.mode3d && m) {
+    if (!m.model || !m.model.available) t = "No 3D model for this room (built before server 0.8). Showing the plan instead.";
+    else if (M.loading) t = "Loading the 3D model (" + (m.model.bytes / 1048576).toFixed(1) + " MB)…";
+    else if (M.err) t = "The 3D model could not be shown: " + M.err + ". Showing the plan instead.";
+    else if (show3d()) t = "3D model: " + m.model.vertices.toLocaleString("en-GB") + " points, " + m.model.triangles.toLocaleString("en-GB") + " triangles, " + m.model.area_m2 + " m² of surface.";
+  }
+  box.textContent = t; box.hidden = !t;
+}
+async function ensureModel() {
+  const key = modelKey(), id = selMap;
+  if (!key || key === M.key || key === M.loading) return;
+  M.loading = key; M.err = ""; note3d();
+  try {
+    const r = await fetch("/maps/" + encodeURIComponent(id) + "/model", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const buf = await r.arrayBuffer();
+    if (key === modelKey()) { uploadModel(buf); M.key = key; M.ready = true; }
+  } catch (e) { M.key = key; M.ready = false; M.err = String(e && e.message || e); }
+  if (M.loading === key) M.loading = "";
+  drawPlan();
+}
+function glSetup() {
+  if (GL) return GL;
+  const cv = $("gl"), opt = { antialias: true, alpha: false };
+  let gl = cv.getContext("webgl2", opt);
+  if (!gl) { gl = cv.getContext("webgl", opt); if (gl && !gl.getExtension("OES_element_index_uint")) gl = null; }
+  if (!gl) throw new Error("this browser has no WebGL");
+  const prog = (vs, fs) => {
+    const p = gl.createProgram();
+    [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]].forEach(([k, src]) => {
+      const s = gl.createShader(k); gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); gl.attachShader(p, s);
+    });
+    ["aP", "aC", "aN"].forEach((a, i) => gl.bindAttribLocation(p, i, a)); gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    const u = {}; for (let i = 0; i < gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS); i++) { const n = gl.getActiveUniform(p, i).name; u[n] = gl.getUniformLocation(p, n); }
+    return { p, u };
+  };
+  GL = {
+    gl, mesh: prog(
+      `attribute vec3 aP; attribute vec3 aC; attribute vec3 aN; uniform mat4 uM; uniform vec3 uUp; uniform vec3 uL; varying vec3 vC; varying float vH;
+       void main() { vec3 n = normalize(aN + vec3(1e-4)); vC = aC * (0.52 + 0.36 * abs(dot(n, uL)) + 0.12 * dot(n, uUp)); vH = dot(aP, uUp); gl_Position = uM * vec4(aP, 1.0); }`,
+      `precision highp float; varying vec3 vC; varying float vH; uniform float uCut; void main() { if (vH > uCut) discard; gl_FragColor = vec4(vC, 1.0); }`),
+    flat: prog(`attribute vec3 aP; uniform mat4 uM; uniform float uS; void main() { gl_Position = uM * vec4(aP, 1.0); gl_PointSize = uS; }`,
+      `precision mediump float; uniform vec4 uC; void main() { gl_FragColor = uC; }`),
+    vbo: gl.createBuffer(), ibo: gl.createBuffer(), dyn: gl.createBuffer(),
+  };
+  return GL;
+}
+function uploadModel(buf) {
+  const dv = new DataView(buf);
+  if (String.fromCharCode(...new Uint8Array(buf, 0, 4)) !== "LRM1") throw new Error("not a room model file");
+  const n = dv.getUint32(4, true), m = dv.getUint32(8, true), f = i => dv.getFloat32(16 + 4 * i, true);
+  const pad = b => b + (-b % 4 + 4) % 4, oP = 40, oC = oP + 12 * n, oN = oC + pad(3 * n), oI = oN + pad(3 * n);
+  if (oI + 12 * m > buf.byteLength) throw new Error("the model file is shorter than its header says");
+  const { gl, vbo, ibo } = glSetup();
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(buf, 0, oI), gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(buf, oI, 3 * m), gl.STATIC_DRAW);
+  Object.assign(M, { nTri: m, off: [oP, oC, oN], bmin: [f(0), f(1), f(2)], bmax: [f(3), f(4), f(5)] });
+}
+function resetCam() {
+  const F = hf(), c = Vc.mul(Vc.add(M.bmin, M.bmax), 0.5), diag = Math.hypot(...Vc.sub(M.bmax, M.bmin));
+  cam.t = Vc.add(c, Vc.mul(F.u, floorH(F) - Vc.dot(c, F.u)));  // look at the middle of the floor
+  cam.yaw = 0.8; cam.pitch = 0.85; cam.dist = 0.42 * diag / Math.tan(cam.fov / 2); cam.key = M.key;
+}
+function camEye(F) { return Vc.add(cam.t, Vc.mul(Vc.add(Vc.mul(hdir(F, cam.yaw), Math.cos(cam.pitch)), Vc.mul(F.u, Math.sin(cam.pitch))), cam.dist)); }
+function camRay(px, py) {  // ray through a pixel of the canvas (CSS pixels)
+  const cv = $("gl"), F = hf(), e = camEye(F), f = Vc.unit(Vc.sub(cam.t, e)), r = Vc.unit(Vc.cross(f, F.u)), up = Vc.cross(r, f);
+  const th = Math.tan(cam.fov / 2), x = (2 * px / cv.clientWidth - 1) * th * cv.clientWidth / cv.clientHeight, y = (1 - 2 * py / cv.clientHeight) * th;
+  return { o: e, d: Vc.unit(Vc.add(f, Vc.add(Vc.mul(r, x), Vc.mul(up, y)))), r, up, F };
+}
+function planeHit(ray, h) { const k = Vc.dot(ray.d, ray.F.u); if (Math.abs(k) < 1e-6) return null; const s = (h - Vc.dot(ray.o, ray.F.u)) / k; return s > 0 ? Vc.add(ray.o, Vc.mul(ray.d, s)) : null; }
+function mat(F, W, H) {
+  const e = camEye(F), z = Vc.unit(Vc.sub(e, cam.t)), x = Vc.unit(Vc.cross(F.u, z)), y = Vc.cross(z, x);
+  const n = cam.dist * 0.02, fa = cam.dist * 4 + Math.hypot(...Vc.sub(M.bmax, M.bmin)) * 2, t = 1 / Math.tan(cam.fov / 2);
+  const P = [t * H / W, 0, 0, 0, 0, t, 0, 0, 0, 0, (fa + n) / (n - fa), -1, 0, 0, 2 * fa * n / (n - fa), 0];
+  const V = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -Vc.dot(x, e), -Vc.dot(y, e), -Vc.dot(z, e), 1];
+  const o = new Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += P[k * 4 + r] * V[c * 4 + k]; o[c * 4 + r] = s; }
+  return { m: o, eye: e };
+}
+// the door now: while editing the edited one, else the server's (GET /monitor/map -> portal); sizes in map units
+function doorNow() {
+  const sc = scaleM();
+  if (ED) { const F = hf(), n = hdir(F, ED.yaw); return { p: ED.p, r: Vc.cross(F.u, n), up: F.u, n, w: ED.w / sc, h: ED.h / sc, edit: true }; }
+  const po = mapData && mapData.portal; if (!po || !po.position || po.source === "none") return null;
+  const [x, y, z, w] = po.quaternion_xyzw;
+  return { p: po.position, r: [1 - 2 * (y * y + z * z), 2 * (x * y + z * w), 2 * (x * z - y * w)], up: [2 * (x * y - z * w), 1 - 2 * (x * x + z * z), 2 * (y * z + x * w)],
+    n: [2 * (x * z + y * w), 2 * (y * z - x * w), 1 - 2 * (x * x + y * y)], w: po.width || 0.9 / sc, h: po.height || 2 / sc, auto: !po.confirmed };
+}
+function quatOf(r, u, n) {  // rotation with the columns right, up, normal -> [x, y, z, w]
+  const [m00, m10, m20] = r, [m01, m11, m21] = u, [m02, m12, m22] = n, tr = m00 + m11 + m22; let q;
+  if (tr > 0) { const s = Math.sqrt(tr + 1) * 2; q = [(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, s / 4]; }
+  else if (m00 > m11 && m00 > m22) { const s = Math.sqrt(1 + m00 - m11 - m22) * 2; q = [s / 4, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s]; }
+  else if (m11 > m22) { const s = Math.sqrt(1 + m11 - m00 - m22) * 2; q = [(m01 + m10) / s, s / 4, (m12 + m21) / s, (m02 - m20) / s]; }
+  else { const s = Math.sqrt(1 + m22 - m00 - m11) * 2; q = [(m02 + m20) / s, (m12 + m21) / s, s / 4, (m10 - m01) / s]; }
+  return q.map(v => +v.toFixed(6));
+}
+function doorHit(ray, D) {  // does the ray go through the door's box (a little thicker than drawn)?
+  const rel = Vc.sub(ray.o, D.p), ax = [D.r, D.up, D.n], lo = [-D.w / 2, 0, -0.15 / scaleM()], hi = [D.w / 2, D.h, 0.15 / scaleM()];
+  let t0 = 0, t1 = 1e9;
+  for (let i = 0; i < 3; i++) {
+    const o = Vc.dot(rel, ax[i]), d = Vc.dot(ray.d, ax[i]);
+    if (Math.abs(d) < 1e-9) { if (o < lo[i] || o > hi[i]) return false; continue; }
+    let a = (lo[i] - o) / d, b = (hi[i] - o) / d; if (a > b) [a, b] = [b, a];
+    t0 = Math.max(t0, a); t1 = Math.min(t1, b); if (t0 > t1) return false;
+  }
+  return Vc.add(ray.o, Vc.mul(ray.d, t0));  // where the ray enters the box
+}
+const rgb = (hex, a = 1) => { const h = hex.replace("#", ""), v = h.length === 3 ? h.split("").map(c => parseInt(c + c, 16)) : [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16)); return [...v.map(x => x / 255), a]; };
+function draw3dSoon() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; draw3d(); }); }
+function draw3d() {
+  if (!show3d()) return;
+  const cv = $("gl"), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight; if (!W || !H) return;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  if (cam.key !== M.key) resetCam();
+  const { gl, mesh, flat, vbo, ibo, dyn } = GL, F = hf(), sc = scaleM(), { m, eye } = mat(F, W, H);
+  const css = getComputedStyle(document.documentElement), C = (n, a) => rgb(css.getPropertyValue(n).trim(), a);
+  gl.viewport(0, 0, cv.width, cv.height); gl.clearColor(...C("--surface")); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  gl.enable(gl.DEPTH_TEST); gl.depthMask(true); gl.disable(gl.BLEND);
+  // the model: coloured triangles lit from the camera; nothing above the cut (ceiling away)
+  gl.useProgram(mesh.p); gl.uniformMatrix4fv(mesh.u.uM, false, m); gl.uniform3fv(mesh.u.uUp, F.u); gl.uniform3fv(mesh.u.uL, Vc.unit(Vc.sub(eye, cam.t))); gl.uniform1f(mesh.u.uCut, cutH(F));
+  gl.bindBuffer(gl.ARRAY_BUFFER, vbo); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  [[0, 3, gl.FLOAT, false], [1, 3, gl.UNSIGNED_BYTE, true], [2, 3, gl.BYTE, true]].forEach(([i, k, ty, nm]) => { gl.enableVertexAttribArray(i); gl.vertexAttribPointer(i, k, ty, nm, 0, M.off[i]); });
+  gl.drawElements(gl.TRIANGLES, 3 * M.nTri, gl.UNSIGNED_INT, 0);
+  gl.disableVertexAttribArray(1); gl.disableVertexAttribArray(2);
+  // lines, boxes and dots: one colour each
+  gl.useProgram(flat.p); gl.uniformMatrix4fv(flat.u.uM, false, m); gl.bindBuffer(gl.ARRAY_BUFFER, dyn);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  const put = (pts, mode, color, size = 1) => {
+    if (!pts.length) return;
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(pts.flat()), gl.DYNAMIC_DRAW); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    gl.uniform4fv(flat.u.uC, color); gl.uniform1f(flat.u.uS, size); gl.drawArrays(mode, 0, pts.length);
+  };
+  const loop = c => c.flatMap((p, i) => [p, c[(i + 1) % c.length]]);
+  // floor grid, 1 m
+  const fh = floorH(F), step = 1 / sc, lift = Vc.mul(F.u, fh + 0.005 / sc), ab = [];
+  for (let i = 0; i < 8; i++) { const p = [[M.bmin, M.bmax][i & 1][0], [M.bmin, M.bmax][(i >> 1) & 1][1], [M.bmin, M.bmax][(i >> 2) & 1][2]]; ab.push([Vc.dot(p, F.r0), Vc.dot(p, F.r90)]); }
+  const a0 = Math.floor(Math.min(...ab.map(v => v[0])) / step) * step, a1 = Math.ceil(Math.max(...ab.map(v => v[0])) / step) * step;
+  const b0 = Math.floor(Math.min(...ab.map(v => v[1])) / step) * step, b1 = Math.ceil(Math.max(...ab.map(v => v[1])) / step) * step;
+  const gp = (a, b) => Vc.add(lift, Vc.add(Vc.mul(F.r0, a), Vc.mul(F.r90, b))), grid = [];
+  for (let a = a0; a <= a1 + 1e-6; a += step) grid.push(gp(a, b0), gp(a, b1));
+  for (let b = b0; b <= b1 + 1e-6; b += step) grid.push(gp(a0, b), gp(a1, b));
+  put(grid, gl.LINES, C("--muted", 0.45));
+  const room = mapData.room;
+  put(room.walls.flatMap(w => loop(w.corners)), gl.LINES, C("--ink", 0.75));
+  if (room.floor && room.floor.outline) put(loop(room.floor.outline), gl.LINES, C("--accent", 0.8));
+  put(room.openings.flatMap(o => loop(o.corners)), gl.LINES, C("--accent", 0.9));
+  put(mapData.cameras, gl.POINTS, C("--ink2", 0.8), 4 * dpr);
+  // the door: a box of its width and height, 10 cm deep, and an arrow on the floor into the room
+  const D = doorNow();
+  if (D) {
+    const k = i => Vc.add(D.p, Vc.add(Vc.mul(D.r, (i & 1 ? 0.5 : -0.5) * D.w), Vc.add(Vc.mul(D.up, i & 2 ? D.h : 0), Vc.mul(D.n, (i & 4 ? 0.05 : -0.05) / sc))));
+    const faces = [[0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]].flatMap(f => [k(f[0]), k(f[1]), k(f[2]), k(f[0]), k(f[2]), k(f[3])]);
+    const edges = []; for (let i = 0; i < 8; i++) for (const b of [1, 2, 4]) if (!(i & b)) edges.push(k(i), k(i | b));
+    const tip = Vc.add(D.p, Vc.mul(D.n, 0.6 / sc)), back = Vc.add(D.p, Vc.mul(D.n, 0.45 / sc)), side = Vc.mul(D.r, 0.1 / sc);
+    edges.push(D.p, tip, tip, Vc.add(back, side), tip, Vc.sub(back, side));
+    const col = C("--door"), a = D.edit ? 1 : D.auto ? 0.5 : 0.85;
+    gl.depthMask(false);
+    put(faces, gl.TRIANGLES, [...col.slice(0, 3), (D.edit ? 0.55 : 0.4) * a]); put(edges, gl.LINES, [...col.slice(0, 3), a]);
+    gl.disable(gl.DEPTH_TEST);  // seen through the walls as well, fainter
+    put(faces, gl.TRIANGLES, [...col.slice(0, 3), 0.12 * a]); put(edges, gl.LINES, [...col.slice(0, 3), 0.55 * a]);
+    gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
+  }
+  gl.disable(gl.BLEND);
+}
+(function interact3d() {
+  const cv = $("gl"); let drag = null;
+  const at = e => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  cv.addEventListener("contextmenu", e => e.preventDefault());
+  cv.addEventListener("pointerdown", e => {
+    if (!show3d()) return;
+    cv.setPointerCapture(e.pointerId);
+    const ray = camRay(...at(e)), D = doorNow(), grab = e.button === 0 && !e.shiftKey && D && doorHit(ray, D);
+    if (grab) {  // grab the door (selects it for editing); it slides in the horizontal plane through the grabbed point
+      if (!ED) startEdit();
+      const lv = Vc.dot(grab, ray.F.u);
+      drag = { kind: "door", lv, off: Vc.sub(ED.p, Vc.add(grab, Vc.mul(ray.F.u, Vc.dot(ED.p, ray.F.u) - lv))) }; cv.style.cursor = "move"; return;
+    }
+    drag = { kind: e.button === 2 || e.button === 1 || e.shiftKey ? "pan" : "orbit", x: e.clientX, y: e.clientY, yaw: cam.yaw, pitch: cam.pitch };
+    cv.style.cursor = "grabbing";
+  });
+  cv.addEventListener("pointermove", e => {
+    if (!show3d()) return;
+    if (!drag) { const D = doorNow(); cv.style.cursor = D && doorHit(camRay(...at(e)), D) ? "move" : "grab"; return; }
+    if (drag.kind === "door") {  // the door's bottom keeps its height (on the floor)
+      const ray = camRay(...at(e)), h = planeHit(ray, drag.lv);
+      if (h) { ED.p = Vc.add(Vc.add(h, Vc.mul(ray.F.u, Vc.dot(ED.p, ray.F.u) - drag.lv)), drag.off); syncEdit(); }
+    }
+    else if (drag.kind === "orbit") { cam.yaw = drag.yaw - (e.clientX - drag.x) * 0.008; cam.pitch = Math.max(-0.3, Math.min(1.55, drag.pitch + (e.clientY - drag.y) * 0.006)); }
+    else {
+      const ray = camRay(0, 0), k = 2 * cam.dist * Math.tan(cam.fov / 2) / cv.clientHeight;
+      cam.t = Vc.add(cam.t, Vc.add(Vc.mul(ray.r, -(e.clientX - drag.x) * k), Vc.mul(ray.up, (e.clientY - drag.y) * k))); drag.x = e.clientX; drag.y = e.clientY;
+    }
+    draw3dSoon();
+  });
+  const end = () => { drag = null; cv.style.cursor = "grab"; };
+  cv.addEventListener("pointerup", end); cv.addEventListener("pointercancel", end);
+  cv.addEventListener("wheel", e => { if (!show3d()) return; e.preventDefault(); cam.dist = Math.max(0.3, Math.min(200, cam.dist * (e.deltaY < 0 ? 0.89 : 1.12))); draw3dSoon(); }, { passive: false });
+  $("vreset").onclick = () => { resetCam(); draw3dSoon(); };
+  $("cutceil").onchange = draw3dSoon;
+})();
+
+// ---------------------------------------------------------------- door editing (saved with PUT /maps/{id}/anchors/portal)
+function startEdit() {
+  if (!show3d()) return;
+  const D = doorNow(), F = hf(), sc = scaleM();
+  if (D) ED = { p: D.p.slice(), yaw: yawOf(F, D.n), w: +(D.w * sc).toFixed(3), h: +(D.h * sc).toFixed(3), placed: false };
+  else {  // a new door in front of the view's centre, on the floor, facing the viewer
+    const p = Vc.add(cam.t, Vc.mul(F.u, floorH(F) - Vc.dot(cam.t, F.u)));
+    ED = { p, yaw: yawOf(F, Vc.sub(camEye(F), cam.t)), w: 0.9, h: 2.0, placed: true };
+  }
+  ED.map = selMap; ED.orig = { p: ED.p.slice(), yaw: ED.yaw, w: ED.w, h: ED.h };
+  $("dmsg").textContent = ""; syncEdit(true); drawPlan();
+}
+function endEdit() { ED = null; $("doored").hidden = true; $("dmsg").textContent = ""; syncEdit(); draw3dSoon(); }
+function syncEdit(fields) {  // the numbers under the view (and the fields, unless the user is typing in one)
+  const b = $("dedit"), po = mapData && mapData.portal;
+  b.textContent = ED ? "Stop editing" : po && po.position && po.source !== "none" ? "Edit door" : "Place door";
+  b.classList.toggle("on", !!ED);
+  if (!ED) return;
+  const F = hf(), sc = scaleM(), dy = deg(ED.yaw);
+  if (fields || document.activeElement !== $("dyawn")) $("dyawn").value = dy.toFixed(0);
+  $("dyaw").value = dy.toFixed(0);
+  if (fields) { $("dw").value = ED.w; $("dh").value = ED.h; }
+  const moved = Math.hypot(...Vc.sub(ED.p, ED.orig.p)) * sc, above = (Vc.dot(ED.p, F.u) - floorH(F)) * sc;
+  $("dnums").textContent = "position " + ED.p.map(v => v.toFixed(3)).join(", ") + (sc !== 1 ? " (map units)" : " m") + " · yaw " + dy.toFixed(1) + "° · " + ED.w.toFixed(2) + " × " + ED.h.toFixed(2) + " m" +
+    " · bottom " + (above >= 0 ? "+" : "") + (above * 100).toFixed(1) + " cm from the floor · " + (ED.placed ? "new door" : "moved " + (moved * 100).toFixed(0) + " cm, turned " + deg(ED.yaw - ED.orig.yaw).toFixed(1) + "°");
+  draw3dSoon();
+}
+$("dedit").onclick = () => ED ? endEdit() : startEdit();
+$("dcancel").onclick = endEdit;
+$("dyaw").oninput = () => { if (ED) { ED.yaw = +$("dyaw").value * Math.PI / 180; syncEdit(); } };
+$("dyawn").oninput = () => { const v = parseFloat($("dyawn").value); if (ED && isFinite(v)) { ED.yaw = v * Math.PI / 180; syncEdit(); } };
+["dw", "dh"].forEach(id => $(id).oninput = () => {
+  const v = parseFloat($(id).value), ok = isFinite(v) && v >= 0.3 && v <= 6;
+  $(id).style.borderColor = ok ? "" : "var(--critical)"; if (ED && ok) { ED[id === "dw" ? "w" : "h"] = v; syncEdit(); }
+});
+$("dwall").onclick = () => {  // face the room like the nearest wall (its normal points into the room)
+  if (!ED) return;
+  const F = hf(), flat = v => [Vc.dot(v, F.r0), Vc.dot(v, F.r90)], p = flat(ED.p); let best = null, bd = 1e9;
+  mapData.room.walls.forEach(w => {
+    const a = flat(w.corners[0]), b = flat(w.corners[1]), ab = [b[0] - a[0], b[1] - a[1]], L = ab[0] ** 2 + ab[1] ** 2 || 1;
+    const s = Math.max(0, Math.min(1, ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1]) / L)), d = Math.hypot(a[0] + s * ab[0] - p[0], a[1] + s * ab[1] - p[1]);
+    if (d < bd) { bd = d; best = w; }
+  });
+  if (!best) { $("dmsg").textContent = "this room plan has no walls"; return; }
+  ED.yaw = yawOf(F, best.normal); $("dmsg").textContent = "turned like wall " + best.id + " (" + (bd * scaleM()).toFixed(2) + " m away)"; syncEdit(true);
+};
+$("dsave").onclick = async () => {
+  if (!ED) return;
+  const F = hf(), n = hdir(F, ED.yaw), id = ED.map;
+  const body = { position: ED.p.map(v => +v.toFixed(4)), quaternion_xyzw: quatOf(Vc.cross(F.u, n), F.u, n), width: ED.w, height: ED.h };
+  $("dmsg").textContent = "saving…";
+  try {
+    const r = await fetch("/maps/" + encodeURIComponent(id) + "/anchors/portal", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (!r.ok) { let t = "HTTP " + r.status; try { t = (await r.json()).detail || t; } catch (e) {} $("dmsg").textContent = "not saved: " + t; return; }
+    endEdit(); $("dmsg").textContent = "saved"; await loadMap(true);
+  } catch (e) { $("dmsg").textContent = "not saved: the server did not answer"; }
+};
+
+// ---------------------------------------------------------------- scan quality of the selected room
+let scanKey = "";
+const VERDICT = { good: ["good", "✓", "good scan"], limited: ["warning", "▲", "limited scan"], rescan: ["critical", "✕", "scan again"] };
+async function loadScan() {
+  const m = mapRow();
+  if (!m || !m.scan) { $("scanq").hidden = true; scanKey = ""; return; }
+  const key = m.map_id + "|" + m.created_utc + "|" + m.scan.verdict + "|" + m.scan.summary;
+  if (key === scanKey) return;
+  scanKey = key; renderScan(m.scan);
+  try {
+    const r = await fetch("/maps/" + encodeURIComponent(m.map_id), { cache: "no-store" });
+    const j = r.ok ? await r.json() : null;
+    if (j && j.scan_quality && scanKey === key) renderScan(j.scan_quality);
+  } catch (e) {}
+}
+function renderScan(q) {
+  const box = $("scanq"), head = el("div", "head"), v = VERDICT[q.verdict] || ["idle", "○", q.verdict || "not judged"];
+  head.append(el("b", "", "Scan quality"), chip(...v), el("span", "ink2", q.summary || ""));
+  box.replaceChildren(head);
+  (q.issues || []).forEach(i => {
+    const d = el("div", "issue");
+    if (typeof i === "string") d.append(el("span", "mono", i));  // the short row has the codes only
+    else { d.append(el("div", "", i.text || i.code)); if (i.do) d.append(el("div", "ink2", "What to do: " + i.do)); d.title = i.code + (i.value != null ? ": " + i.value + " (limit " + i.limit + ")" : ""); }
+    box.append(d);
+  });
+  const mo = q.motion, wa = q.walls, fr = q.frames, pct = x => x == null ? "–" : Math.round(x * 100) + " %";
+  if (mo || wa || fr) {
+    const dl = el("dl", "kv");
+    if (mo && mo.footprint_m) kv(dl, "Walked over", mo.footprint_m.map(x => x.toFixed(1)).join(" × ") + " m");
+    if (mo && mo.pitch_deg) kv(dl, "Phone tilt", "from " + num(mo.pitch_deg.lowest, 0) + "° to " + num(mo.pitch_deg.highest, 0) + "° (median " + num(mo.pitch_deg.median, 0) + "°)");
+    if (mo && mo.repeated_share != null) kv(dl, "Repeated views", pct(mo.repeated_share));
+    if (wa && wa.walls_seen_share != null) kv(dl, "Walls seen", pct(wa.walls_seen_share) + (wa.least_seen_wall_share != null ? " (least seen wall " + pct(wa.least_seen_wall_share) + ")" : ""));
+    if (fr && fr.selected) kv(dl, "Frames in the map", fr.in_map + " of " + fr.selected + " (" + pct(fr.share) + ")");
+    box.append(dl);
+  }
+  box.hidden = false;
+}
 
 // ---------------------------------------------------------------- main loop
 let fails = 0, tick = 0, lastAnswer = 0, startedAt = 0;
@@ -533,7 +925,7 @@ async function refresh() {
 (function fromAddress() {
   const h = new URLSearchParams(location.hash.slice(1));
   if (h.get("theme") === "dark" || h.get("theme") === "light") document.documentElement.dataset.theme = h.get("theme");
-  if (h.get("view") === "3d") { view.yaw = -0.6; view.tilt = 0.95; setMode(); }
+  if (h.get("view") === "3d") { view.yaw = -0.6; view.tilt = 0.95; view.mode3d = true; setMode(); }
   if (h.get("map")) { selMap = h.get("map"); pickedMap = true; }
   if (h.get("device")) selDev = h.get("device");
 })();
