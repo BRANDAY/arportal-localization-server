@@ -244,6 +244,21 @@ the server falls back to the CPU automatically: everything works, a query then
 takes about 5 s instead of under 1 s. To use such a GPU, change the index in
 `pyproject.toml` (`[[tool.uv.index]]` and `torch==...`) to a newer CUDA build.
 
+### Open in VS Code
+
+1. *File → Open Folder…* → the `localization-server` folder. In a clone of the app repository,
+   `vr-fesb.code-workspace` in its root opens the server and the app in one window.
+2. Install the *Python* extension (`ms-python.python`).
+3. Run `uv sync` once (above), then *Ctrl+Shift+P → Python: Select Interpreter* and choose
+   `.venv\Scripts\python.exe`. With `env.ps1 -Root <folder>` the environment is in
+   `<folder>\venv\Scripts\python.exe` instead.
+4. Tests: in the *Testing* panel choose *pytest* and the folder `tests`, or run `uv run pytest`
+   in the terminal.
+5. Start the server with a double click on `Start AR Portal Server.cmd`, or in the terminal of
+   VS Code as in "Run the server" below.
+
+Android Studio is not needed for the server.
+
 ---
 
 ## Build a map
